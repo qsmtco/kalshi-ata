@@ -81,6 +81,8 @@ It combines **AI-driven signal models**, **quantitative strategies**, and **mult
 /help           - Full command reference
 ```
 
+<img width="512" height="499" alt="Screenshot 2025-12-07 at 13 53 56" src="https://github.com/user-attachments/assets/f286a58c-04f6-43c4-835b-3960976b57b9" />
+
 ---
 
 ## 🧩 System Architecture (Mermaid Visualization)
