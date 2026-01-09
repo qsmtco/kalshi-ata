@@ -165,7 +165,7 @@ npm --version
 ### Clone Repository
 
 ```bash
-git clone https://github.com/LoQiseaking69/kalshi-trading-bot.git
+git clone https://github.com/yllvar/Kalshi-Quant-Telebot.git
 cd kalshi-trading-bot
 ```
 
