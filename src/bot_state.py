@@ -165,6 +165,9 @@ def fetch_settings_info() -> Dict[str, Any]:
 
 
 def run(command: str, data: Dict[str, Any] = None) -> Dict[str, Any]:
+    from config import PAPER_TRADING
+    from paper_trader import PaperTrader
+    
     api = KalshiAPI()
 
     if command == "status":
@@ -185,6 +188,25 @@ def run(command: str, data: Dict[str, Any] = None) -> Dict[str, Any]:
         return reset_settings()
     if command == "settings_info":
         return fetch_settings_info()
+    
+    # Phase 3: Paper trading commands
+    if command == "paper_status":
+        return {
+            'paper_trading': PAPER_TRADING,
+            'message': '📄 Paper Trading Mode: ENABLED' if PAPER_TRADING else '💰 Live Trading Mode: ENABLED'
+        }
+    
+    if command == "paper_performance":
+        if not PAPER_TRADING:
+            return {'error': 'Paper trading is not enabled'}
+        pt = PaperTrader()
+        return pt.get_performance_summary()
+    
+    if command == "paper_trades":
+        if not PAPER_TRADING:
+            return {'error': 'Paper trading is not enabled'}
+        pt = PaperTrader()
+        return {'trades': pt.get_all_trades()}
 
     raise ValueError(f"Unsupported command: {command}")
 

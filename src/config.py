@@ -39,4 +39,18 @@ VOLATILITY_THRESHOLD = 0.1     # Volatility threshold for trading
 MAX_POSITION_SIZE_PERCENTAGE = 0.10 # Max percentage of bankroll to commit to a single trade
 STOP_LOSS_PERCENTAGE = 0.05         # Percentage loss at which to close a position
 
+# =========================================================================
+# PHASE 3: PAPER TRADING MODE
+# =========================================================================
+# Default to True for safety - must explicitly enable live trading
+PAPER_TRADING = os.environ.get('PAPER_TRADING', 'true').lower() == 'true'
+
+# =========================================================================
+# PHASE 5: MARKET MAKING
+# =========================================================================
+MARKET_MAKING_ENABLED = os.environ.get('MARKET_MAKING_ENABLED', 'false').lower() == 'true'
+MARKET_MAKING_MAX_POSITION_PCT = float(os.environ.get('MARKET_MAKING_MAX_PCT', '0.40'))
+MARKET_MAKING_MIN_VOLUME = int(os.environ.get('MARKET_MAKING_MIN_VOLUME', '1000'))
+MARKET_MAKING_MIN_SPREAD = float(os.environ.get('MARKET_MAKING_MIN_SPREAD', '0.02'))
+
 

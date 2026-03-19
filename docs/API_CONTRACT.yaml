@@ -1,0 +1,617 @@
+openapi: 3.0.3
+info:
+  title: Kalshi Adaptive Trading Agent API
+  version: 1.0.0
+  description: REST API for bot control, analytics, and agent settings
+  contact:
+    name: Qaster
+    url: https://github.com/yllvar/Kalshi-Quant-TeleBot
+
+servers:
+  - url: http://localhost:3001
+    description: Local development
+
+paths:
+  /health:
+    get:
+      summary: Health check endpoint
+      responses:
+        '200':
+          description: Healthy
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthResponse'
+
+  /api/status:
+    get:
+      summary: Bot operational status
+      responses:
+        '200':
+          description: Status information
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StatusResponse'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+
+  /api/positions:
+    get:
+      summary: List open positions
+      responses:
+        '200':
+          description: Current open positions
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PositionsResponse'
+
+  /api/performance:
+    get:
+      summary: Performance metrics by strategy
+      parameters:
+        - name: days
+          in: query
+          description: Lookback period in days
+          schema:
+            type: integer
+            default: 30
+            minimum: 1
+            maximum: 365
+      responses:
+        '200':
+          description: Performance data
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PerformanceResponse'
+
+  /api/trades:
+    get:
+      summary: Retrieve trades with optional filtering
+      parameters:
+        - name: strategy
+          in: query
+          description: Filter by strategy name
+          schema:
+            type: string
+        - name: limit
+          in: query
+          description: Maximum number of trades to return
+          schema:
+            type: integer
+            default: 1000
+            maximum: 10000
+        - name: from_date
+          in: query
+          description: ISO 8601 start date
+          schema:
+            type: string
+            format: date-time
+        - name: to_date
+          in: query
+          description: ISO 8601 end date
+          schema:
+            type: string
+            format: date-time
+      responses:
+        '200':
+          description: Trade list
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TradesResponse'
+
+  /api/regime:
+    get:
+      summary: Current market regime classification
+      responses:
+        '200':
+          description: Regime features
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RegimeResponse'
+
+  /api/settings:
+    get:
+      summary: Get all current settings
+      responses:
+        '200':
+          description: Current configuration
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SettingsResponse'
+    post:
+      summary: Update settings (validates guardrails)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties:
+                type: number | boolean
+              example:
+                kellyFraction: 0.60
+                maxPositionSizePct: 0.10
+      responses:
+        '200':
+          description: Settings updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SettingsUpdateResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /api/settings/history:
+    get:
+      summary: Audit trail of setting changes
+      parameters:
+        - name: parameter
+          in: query
+          description: Filter by parameter name
+          schema:
+            type: string
+        - name: limit
+          in: query
+          description: Maximum entries
+          schema:
+            type: integer
+            default: 50
+            maximum: 1000
+      responses:
+        '200':
+          description: History log
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SettingsHistoryResponse'
+
+  /api/settings/rollback:
+    get:
+      summary: Rollback settings to a specific timestamp
+      parameters:
+        - name: timestamp
+          in: query
+          required: true
+          description: ISO 8601 timestamp to roll back to
+          schema:
+            type: string
+            format: date-time
+      responses:
+        '200':
+          description: Rollback successful
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RollbackResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+
+  /api/start-trading:
+    post:
+      summary: Start automated trading (checks circuit breaker)
+      responses:
+        '200':
+          description: Trading started
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TradingControlResponse'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /api/stop-trading:
+    post:
+      summary: Stop all trading
+      responses:
+        '200':
+          description: Trading stopped
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TradingControlResponse'
+
+components:
+  schemas:
+    HealthResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          enum: [healthy, unhealthy]
+        timestamp:
+          type: string
+          format: date-time
+        components:
+          type: object
+          properties:
+            bot:
+              type: string
+              enum: [running, stopped, error]
+            database:
+              type: string
+              enum: [connected, disconnected, error]
+            api:
+              type: string
+              enum: [ok, error]
+        uptime:
+          type: integer
+          description: Uptime in seconds
+
+    StatusResponse:
+      type: object
+      properties:
+        trading:
+          type: boolean
+        apiConnected:
+          type: boolean
+        lastUpdate:
+          type: string
+          format: date-time
+        uptime:
+          type: string
+        exchangeStatus:
+          type: object
+        balanceSummary:
+          type: object
+          properties:
+            available:
+              type: number
+            totalEquity:
+              type: number
+            unrealizedPnL:
+              type: number
+        positionsCount:
+          type: integer
+        activeStrategies:
+          type: array
+          items:
+            type: string
+        tradesCountToday:
+          type: integer
+
+    PositionsResponse:
+      type: object
+      properties:
+        positions:
+          type: array
+          items:
+            $ref: '#/components/schemas/Position'
+
+    Position:
+      type: object
+      properties:
+        marketId:
+          type: string
+        marketTitle:
+          type: string
+        strategy:
+          type: string
+        action:
+          type: string
+          enum: [buy, sell]
+        quantity:
+          type: integer
+        entryPrice:
+          type: number
+        currentPrice:
+          type: number
+        pnl:
+          type: number
+        timestamp:
+          type: string
+          format: date-time
+
+    PerformanceResponse:
+      type: object
+      properties:
+        period_days:
+          type: integer
+        portfolio:
+          type: object
+          properties:
+            totalPnL:
+              type: number
+            sharpeRatio:
+              type: number
+            maxDrawdown:
+              type: number
+            currentDrawdown:
+              type: number
+            winRate:
+              type: number
+        performance:
+          type: array
+          items:
+            $ref: '#/components/schemas/StrategyPerformance'
+
+    StrategyPerformance:
+      type: object
+      properties:
+        strategy:
+          type: string
+        totalTrades:
+          type: integer
+        winningTrades:
+          type: integer
+        winRate:
+          type: number
+        totalPnL:
+          type: number
+        avgWin:
+          type: number
+        avgLoss:
+          type: number
+        sharpeRatio:
+          type: number
+        maxDrawdown:
+          type: number
+
+    TradesResponse:
+      type: object
+      properties:
+        total:
+          type: integer
+        trades:
+          type: array
+          items:
+            $ref: '#/components/schemas/Trade'
+
+    Trade:
+      type: object
+      properties:
+        id:
+          type: integer
+        timestamp:
+          type: string
+          format: date-time
+        marketId:
+          type: string
+        marketTitle:
+          type: string
+        strategy:
+          type: string
+        action:
+          type: string
+          enum: [buy, sell]
+        quantity:
+          type: integer
+        entryPrice:
+          type: number
+        exitPrice:
+          type: number
+        pnl:
+          type: number
+        confidence:
+          type: number
+          format: float
+          minimum: 0
+          maximum: 1
+        positionSizePct:
+          type: number
+          format: float
+        stopLossPct:
+          type: number
+          format: float
+        takeProfitPct:
+          type: number
+          format: float
+        exitReason:
+          type: string
+          enum: [stop_loss, take_profit, manual, end_of_day, circuit_breaker]
+        metadata:
+          type: object
+          additionalProperties: true
+        closedAt:
+          type: string
+          format: date-time
+
+    RegimeResponse:
+      type: object
+      properties:
+        volatilityRegime:
+          type: string
+          enum: [low, normal, high]
+        volatilityPercentile:
+          type: number
+          format: float
+          minimum: 0
+          maximum: 1
+        newsDensity:
+          type: integer
+        avgCorrelation:
+          type: number
+          format: float
+          minimum: 0
+          maximum: 1
+        activeMarketsCount:
+          type: integer
+        timestamp:
+          type: string
+          format: date-time
+
+    SettingsResponse:
+      type: object
+      type: object
+      properties:
+        kellyFraction:
+          type: number
+          format: float
+        maxPositionSizePct:
+          type: number
+          format: float
+        stopLossPct:
+          type: number
+          format: float
+        takeProfitPct:
+          type: number
+          format: float
+        newsSentimentThreshold:
+          type: number
+          format: float
+        statArbitrageThreshold:
+          type: number
+          format: float
+        volatilityThreshold:
+          type: number
+          format: float
+        strategyEnablement:
+          type: object
+          properties:
+            newsSentiment: {type: boolean}
+            statisticalArbitrage: {type: boolean}
+            volatilityBased: {type: boolean}
+        notifications:
+          type: object
+          properties:
+            telegram: {type: boolean}
+            trades: {type: boolean}
+            errors: {type: boolean}
+            performance: {type: boolean}
+
+    SettingsUpdateResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+        data:
+          type: object
+          properties:
+            updated:
+              type: array
+              items:
+                type: string
+            unchanged:
+              type: array
+              items:
+                type: string
+            rejected:
+              type: array
+              items:
+                type: string
+            message:
+              type: string
+
+    SettingsHistoryResponse:
+      type: object
+      properties:
+        history:
+          type: array
+          items:
+            $ref: '#/components/schemas/SettingsChange'
+
+    SettingsChange:
+      type: object
+      properties:
+        id:
+          type: integer
+        changedAt:
+          type: string
+          format: date-time
+        parameter:
+          type: string
+        oldValue:
+          type: string
+        newValue:
+          type: string
+        source:
+          type: string
+          enum: [default, manual, agent, rollback]
+        reason:
+          type: string
+        agentDecisionId:
+          type: integer
+
+    RollbackResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+        data:
+          type: object
+          properties:
+            rolledBack:
+              type: integer
+              description: Number of settings changed
+            settings:
+              $ref: '#/components/schemas/SettingsResponse'
+            message:
+              type: string
+
+    TradingControlResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+        data:
+          type: object
+          properties:
+            trading:
+              type: boolean
+            message:
+              type: string
+
+  responses:
+    BadRequest:
+      description: Validation error
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              success:
+                type: boolean
+              error:
+                type: string
+              code:
+                type: string
+              details:
+                type: object
+                additionalProperties:
+                  type: object
+                  properties:
+                    provided:
+                      type: any
+                    min:
+                      type: any
+                    max:
+                      type: any
+                    error:
+                      type: string
+
+    Forbidden:
+      description: Circuit breaker active or guardrail violation
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              success:
+                type: boolean
+              error:
+                type: string
+              code:
+                type: string
+
+    ServiceUnavailable:
+      description: Bot process not running
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              success:
+                type: boolean
+              error:
+                type: string
+              code:
+                type: string
+
+  securitySchemes: {}

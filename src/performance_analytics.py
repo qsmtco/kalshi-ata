@@ -325,6 +325,80 @@ class PerformanceAnalytics:
             'total_tracked_trades': len(self.trades)
         }
 
+    # =========================================================================
+    # DAILY LOSS LIMIT TRACKING (Phase 1)
+    # =========================================================================
+    
+    def get_daily_pnl(self) -> float:
+        """
+        Calculate P&L for current trading day (UTC).
+        
+        Returns:
+            float: Net P&L for today (positive = profit, negative = loss)
+        """
+        today_start = datetime.utcnow().replace(
+            hour=0, minute=0, second=0, microsecond=0
+        )
+        
+        today_trades = [
+            t for t in self.trades 
+            if t.entry_time and t.entry_time >= today_start
+        ]
+        
+        daily_pnl = sum(t.pnl for t in today_trades if t.pnl is not None)
+        
+        logger.debug(f"Daily P&L: ${daily_pnl:.2f} from {len(today_trades)} trades")
+        
+        return daily_pnl
+    
+    def get_daily_loss_percentage(self, bankroll: float) -> float:
+        """
+        Calculate daily loss as percentage of bankroll.
+        
+        Only returns positive value if there's a loss.
+        Returns 0 if profitable or break-even.
+        
+        Args:
+            bankroll: Current bankroll amount
+            
+        Returns:
+            float: Loss percentage (0.0 to 1.0), 0 if profitable
+        """
+        daily_pnl = self.get_daily_pnl()
+        
+        # Only return positive loss percentage
+        if daily_pnl < 0:
+            loss_pct = abs(daily_pnl) / bankroll
+            logger.debug(f"Daily loss: {loss_pct:.2%}")
+            return loss_pct
+        
+        return 0.0
+    
+    def check_daily_loss_limit(self, bankroll: float, limit_pct: float = 0.15) -> bool:
+        """
+        Check if daily loss exceeds the limit.
+        
+        Args:
+            bankroll: Current bankroll
+            limit_pct: Loss limit as decimal (default 15%)
+            
+        Returns:
+            bool: True if within limit (can trade), False if limit exceeded
+        """
+        loss_pct = self.get_daily_loss_percentage(bankroll)
+        
+        if loss_pct > limit_pct:
+            logger.warning(
+                f"⚠️ DAILY LOSS LIMIT EXCEEDED: {loss_pct:.2%} > {limit_pct:.0%} limit"
+            )
+            return False
+        
+        return True
+    
+    # =========================================================================
+    # END DAILY LOSS LIMIT
+    # =========================================================================
+
     def export_trades_to_csv(self, filename: str):
         """Export all trades to CSV file."""
         if not self.trades:

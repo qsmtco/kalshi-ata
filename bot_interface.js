@@ -15,7 +15,7 @@ class BotInterface {
         this.clients = new Set();
         this.kalshiApiKey = process.env.KALSHI_API_KEY || null;
         this.kalshiApiBaseUrl = process.env.KALSHI_API_BASE_URL || null;
-        this.botStateScript = process.env.BOT_STATE_SCRIPT || path.join(__dirname, '../src/bot_state.py');
+        this.botStateScript = process.env.BOT_STATE_SCRIPT || path.join(__dirname, 'src/bot_state.py');
         
         this.setupExpress();
         this.setupWebSocket();
@@ -452,7 +452,8 @@ class BotInterface {
     // Phase 4: Run bot state command via CLI
     runBotStateCommand(command) {
         return new Promise((resolve, reject) => {
-            if (!this.pythonProcess) {
+            const noBotRequired = ['settings', 'reset_settings', 'settings_info'];
+            if (!this.pythonProcess && !noBotRequired.includes(command)) {
                 reject(new Error('Python bot not running'));
                 return;
             }
@@ -461,7 +462,7 @@ class BotInterface {
             const args = [script, command];
 
             const child = spawn('python3', args, {
-                cwd: path.dirname(script),
+                cwd: __dirname,
                 stdio: ['pipe', 'pipe', 'pipe']
             });
 
@@ -498,7 +499,8 @@ class BotInterface {
     // Phase 4: Run bot state command with input data
     runBotStateCommandWithInput(command, data) {
         return new Promise((resolve, reject) => {
-            if (!this.pythonProcess) {
+            const noBotRequired = ['settings', 'reset_settings', 'settings_info'];
+            if (!this.pythonProcess && !noBotRequired.includes(command)) {
                 reject(new Error('Python bot not running'));
                 return;
             }
@@ -508,7 +510,7 @@ class BotInterface {
             const args = [script, command, '--data', jsonData];
 
             const child = spawn('python3', args, {
-                cwd: path.dirname(script),
+                cwd: __dirname,
                 stdio: ['pipe', 'pipe', 'pipe']
             });
 
