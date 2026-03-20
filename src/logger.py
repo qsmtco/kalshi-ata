@@ -1,11 +1,39 @@
 import sqlite3
+import logging
+import os
 from threading import Lock
 
 class Logger:
     def __init__(self, db_path='data/kalshi.db'):
+        # Convert relative path to absolute based on script location
+        # This ensures db_path works regardless of cwd when Python is spawned
+        if not os.path.isabs(db_path):
+            script_dir = os.path.dirname(os.path.abspath(__file__))
+            project_root = os.path.dirname(script_dir)  # src/ -> project root
+            db_path = os.path.join(project_root, db_path)
         self.db_path = db_path
         self.lock = Lock()
+        # Set up standard Python logging
+        self.logger = logging.getLogger('KalshiBot')
+        self.logger.setLevel(logging.INFO)
+        if not self.logger.handlers:
+            handler = logging.StreamHandler()
+            handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
+            self.logger.addHandler(handler)
         self.init_database()
+    
+    # Standard logging methods
+    def info(self, msg):
+        self.logger.info(msg)
+    
+    def warning(self, msg):
+        self.logger.warning(msg)
+    
+    def error(self, msg):
+        self.logger.error(msg)
+    
+    def debug(self, msg):
+        self.logger.debug(msg)
 
     def init_database(self):
         """Create full trades table per DATABASE_SCHEMA.sql"""

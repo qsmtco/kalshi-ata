@@ -291,8 +291,9 @@ class VolatilityAnalyzer:
 
             signal_analysis = self.detect_volatility_signals(current_vol, recent_vols, trend)
 
-            return {
-                'market_id': market_data.get('id', 'unknown'),
+            # Build result dict - market_data is a dict with keys: market_id, title, current_price, price_history
+            result = {
+                'market_id': market_data.get('market_id', 'unknown'),
                 'market_title': market_data.get('title', ''),
                 'current_price': market_data.get('current_price', 0),
                 'volatility_analysis': hist_vol_analysis,
@@ -306,7 +307,7 @@ class VolatilityAnalyzer:
         except Exception as e:
             logger.error(f"Error analyzing market volatility: {e}")
             return {
-                'market_id': market_data.get('id', 'unknown'),
+                'market_id': market_data.get('market_id', 'unknown') if isinstance(market_data, dict) else 'unknown',
                 'error': str(e)
             }
 

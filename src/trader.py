@@ -184,21 +184,39 @@ class Trader:
     # =========================================================================
     
     def _statistical_arbitrage(self, market_data):
-        """Wrapper for statistical arbitrage analyzer."""
+        """Wrapper for statistical arbitrage analyzer.
+        
+        Note: market_data contains MarketData dataclass instances (not dicts).
+        StatisticalArbitrageAnalyzer expects dicts with .get() method, so we convert.
+        """
         try:
             # Get markets list
             markets_list = market_data.get('markets', [])
             if not markets_list:
                 return None
             
-            opportunities = self.arbitrage_analyzer.find_arbitrage_opportunities(markets_list)
+            # Convert MarketData dataclass instances to dicts for arbitrage_analyzer
+            from dataclasses import asdict
+            markets_dicts = []
+            for m in markets_list:
+                if hasattr(m, '__dataclass_fields__'):
+                    d = asdict(m)
+                    markets_dicts.append(d)
+                else:
+                    markets_dicts.append(m)
+            
+            opportunities = self.arbitrage_analyzer.find_arbitrage_opportunities(markets_dicts)
             return opportunities if opportunities else None
         except Exception as e:
             self.logger.error(f"Statistical arbitrage error: {e}")
             return None
     
     def _volatility_analysis(self, market_data):
-        """Wrapper for volatility analyzer."""
+        """Wrapper for volatility analyzer.
+        
+        Note: market_data contains MarketData dataclass instances (not dicts).
+        VolatilityAnalyzer expects dicts with .get() method, so we convert.
+        """
         try:
             markets_list = market_data.get('markets', [])
             if not markets_list:
@@ -206,7 +224,17 @@ class Trader:
             
             # Take first market (simplified)
             market = markets_list[0]
-            return self.volatility_analyzer.analyze_market_volatility(market)
+            
+            # Convert MarketData dataclass to dict for volatility_analyzer
+            # It expects: {market_id, title, current_price, price_history, ...}
+            if hasattr(market, '__dataclass_fields__'):
+                # It's a dataclass - convert to dict
+                from dataclasses import asdict
+                market_dict = asdict(market)
+            else:
+                market_dict = market
+            
+            return self.volatility_analyzer.analyze_market_volatility(market_dict)
         except Exception as e:
             self.logger.error(f"Volatility analysis error: {e}")
             return None
@@ -321,7 +349,19 @@ class Trader:
         # Strategy 1: News Sentiment Analysis (if enabled)
         if settings.news_sentiment_enabled:
             try:
-                sentiment_analysis = self.news_analyzer.get_market_relevant_news()
+                # Convert MarketData dataclass objects to dicts for news analyzer
+                raw_markets = market_data.get('markets', [])
+                markets_as_dicts = []
+                for m in raw_markets:
+                    if hasattr(m, '__dataclass_fields__'):
+                        from dataclasses import asdict
+                        markets_as_dicts.append(asdict(m))
+                    else:
+                        markets_as_dicts.append(m)
+                
+                sentiment_analysis = self.news_analyzer.get_market_relevant_news(
+                    markets=markets_as_dicts
+                )
                 sentiment_decision = self.news_analyzer.should_trade_based_on_sentiment(
                     sentiment_analysis, settings.news_sentiment_threshold
                 )
@@ -332,14 +372,22 @@ class Trader:
                     # Find suitable market to trade based on sentiment
                     if market_data and 'markets' in market_data and market_data['markets']:
                         market = market_data['markets'][0]  # Simple selection - could be enhanced
-                        event_id = market.get('id')
-                        current_price = market.get('current_price')
+                        # MarketData dataclass: use attribute access not .get()
+                        event_id = getattr(market, 'market_id', None) or getattr(market, 'id', None)
+                        current_price = getattr(market, 'current_price', None)
 
                         if event_id and current_price:
                             action = 'buy' if sentiment_decision['direction'] == 'long' else 'sell'
 
-                            # Apply dynamic risk management
-                            position_size_fraction = self.risk_manager.calculate_position_size_kelly(sentiment_decision['confidence'])
+                            # Apply volatility-adjusted Kelly sizing
+                            # Compute vol from market's price history
+                            vol = None
+                            if hasattr(market, 'price_history'):
+                                vol = self.risk_manager.compute_annualized_volatility(market.price_history)
+                            position_size_fraction = self.risk_manager.calculate_position_size_kelly(
+                                confidence=sentiment_decision['confidence'],
+                                volatility=vol
+                            )
                             position_value = self.risk_manager.current_bankroll * position_size_fraction
                             quantity = max(1, int(position_value / current_price))
 
@@ -384,8 +432,13 @@ class Trader:
                             event_id = market1['id']
                             action = 'sell'
 
-                        # Apply dynamic risk management
-                        position_size_fraction = self.risk_manager.calculate_position_size_kelly(execution_decision['confidence'])
+                        # Apply volatility-adjusted Kelly sizing
+                        # Compute vol from market's price history (market1 is already a dict)
+                        vol = self.risk_manager.compute_annualized_volatility(market1.get('price_history', []))
+                        position_size_fraction = self.risk_manager.calculate_position_size_kelly(
+                            confidence=execution_decision['confidence'],
+                            volatility=vol
+                        )
                         position_value = self.risk_manager.current_bankroll * position_size_fraction
                         quantity = max(1, int(position_value / market1['current_price']))
 
@@ -422,8 +475,13 @@ class Trader:
                         if event_id and current_price and volatility_decision.get('direction'):
                             action = 'buy' if volatility_decision['direction'] == 'long' else 'sell'
 
-                            # Apply dynamic risk management
-                            position_size_fraction = self.risk_manager.calculate_position_size_kelly(volatility_decision['confidence'])
+                            # Apply volatility-adjusted Kelly sizing
+                            # Pass current annualized volatility from GARCH analysis
+                            vol = volatility_decision.get('volatility_analysis', {}).get('current_volatility', None)
+                            position_size_fraction = self.risk_manager.calculate_position_size_kelly(
+                                confidence=volatility_decision['confidence'],
+                                volatility=vol
+                            )
                             position_value = self.risk_manager.current_bankroll * position_size_fraction
                             quantity = max(1, int(position_value / current_price))
 
@@ -516,11 +574,34 @@ class Trader:
                 # Generate unique trade ID for real trade
                 trade_id = f"{strategy}_{event_id}_{int(time.time())}"
                 
-                # Execute the trade via API
-                if action.lower() == 'buy':
-                    self.logger.info(f"BUY ORDER: {quantity} units of {event_id} at ${price:.2f}")
-                elif action.lower() == 'sell':
-                    self.logger.info(f"SELL ORDER: {quantity} units of {event_id} at ${price:.2f}")
+                # Execute the trade via Kalshi API
+                # Convert price to cents (API expects integer cents, e.g., 0.55 -> 55)
+                price_cents = int(price * 100) if price <= 1 else int(price)
+                
+                # Determine side: 'buy' action = 'yes' side, 'sell' action = 'no' side
+                # In Kalshi, 'yes' means betting YES will happen, 'no' means betting it won't
+                side = 'yes' if action.lower() == 'buy' else 'no'
+                
+                # Build order payload per Kalshi API spec
+                # Docs: https://docs.kalshi.com/api-reference/orders/create-order
+                order_payload = {
+                    'ticker': event_id,
+                    'side': side,
+                    'action': action.lower(),
+                    'client_order_id': trade_id,
+                    'count': quantity,
+                    'yes_price': price_cents,  # Price in cents
+                    'no_price': price_cents,
+                }
+                
+                try:
+                    api_response = self.api.create_order(order_payload)
+                    self.logger.info(f"REAL TRADE EXECUTED: {action.upper()} {quantity} {event_id} "
+                                   f"at ${price:.2f} (API response: {api_response})")
+                except Exception as api_err:
+                    self.logger.error(f"API order failed: {api_err}")
+                    self.notifier.send_error_notification(f"Order failed for {event_id}: {api_err}")
+                    return  # Abort if API call fails
 
             # Record trade in performance analytics
             trade = Trade(

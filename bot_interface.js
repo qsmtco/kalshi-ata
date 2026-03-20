@@ -347,6 +347,13 @@ class BotInterface {
         });
     }
 
+    buildPythonEnv() {
+        // Build environment variables for Python process
+        const env = { ...process.env };
+        // Add any Python-specific env vars here if needed
+        return env;
+    }
+
     startPythonBot() {
         if (this.pythonProcess) {
             console.log('Python bot is already running');
@@ -356,7 +363,7 @@ class BotInterface {
         console.log('Starting Python bot...');
         const env = this.buildPythonEnv();
         this.pythonProcess = spawn('python3', [this.pythonBotPath], {
-            cwd: path.dirname(this.pythonBotPath),
+            cwd: __dirname,
             stdio: ['pipe', 'pipe', 'pipe'],
             env,
         });
@@ -559,7 +566,7 @@ module.exports = BotInterface;
 
 // Example usage
 if (require.main === module) {
-    const pythonBotPath = process.env.PYTHON_BOT_PATH || path.join(__dirname, '../src/main.py');
+    const pythonBotPath = process.env.PYTHON_BOT_PATH || path.join(__dirname, 'src/main.py');
     const port = process.env.INTERFACE_PORT || 3001;
     
     const botInterface = new BotInterface(pythonBotPath, port);

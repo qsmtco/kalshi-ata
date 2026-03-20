@@ -35,6 +35,11 @@ class PositionManager:
     MAX_HOLD_DAYS = 10
     
     def __init__(self, db_path: str = "data/kalshi.db"):
+        # Convert relative path to absolute based on script location
+        if not os.path.isabs(db_path):
+            script_dir = os.path.dirname(os.path.abspath(__file__))
+            project_root = os.path.dirname(script_dir)
+            db_path = os.path.join(project_root, db_path)
         self.db_path = db_path
         self.positions: Dict[str, Position] = {}
         self._ensure_table()

@@ -110,24 +110,46 @@ class MarketDataStreamer:
                 time.sleep(self.update_interval)
 
     def _update_market_data(self):
-        """Fetch and update market data."""
+        """Fetch and update market data.
+        
+        Handles two API response formats:
+        - kalshi_api.py (old): returns dict {'markets': [...]}
+        - kalshi_sdk.py (new): returns list [...]
+        
+        Each market dict has: ticker, title, status, yes_bid, yes_ask, no_bid,
+        no_ask, last_price, volume, close_date.
+        """
         try:
             # Get fresh market data from API
             raw_markets = self.api_client.get_markets()
 
-            if not raw_markets or 'markets' not in raw_markets:
-                logger.warning("No market data received from API")
+            # Handle both dict and list response formats
+            markets_list = []
+            if isinstance(raw_markets, dict):
+                # Old API format: {'markets': [...]}
+                markets_list = raw_markets.get('markets', [])
+            elif isinstance(raw_markets, list):
+                # New SDK format: [...]
+                markets_list = raw_markets
+            else:
+                logger.warning("Unknown market data format: %s", type(raw_markets).__name__)
+                return
+
+            if not markets_list:
+                logger.warning("No markets in response")
                 return
 
             updated_markets = []
 
-            for market in raw_markets['markets'][:20]:  # Limit for performance
-                market_id = market.get('id')
+            # Iterate over markets list
+            # Each market has: ticker, title, status, yes_bid, yes_ask, no_bid, no_ask, last_price, volume, close_date
+            for market in markets_list[:20]:  # Limit for performance
+                market_id = market.get('ticker')  # SDK uses 'ticker', not 'id'
                 if not market_id:
                     continue
 
-                # Extract market data
-                current_price = market.get('current_price')
+                # Extract market data - SDK uses 'last_price', not 'current_price'
+                current_price = market.get('last_price')
                 if current_price is None:
                     continue
 
@@ -145,12 +167,13 @@ class MarketDataStreamer:
 
                 else:
                     # Create new market data object
+                    # SDK does not return open_interest, so we set to None
                     market_data = MarketData(
                         market_id=market_id,
                         title=market.get('title', ''),
                         current_price=current_price,
                         volume=market.get('volume'),
-                        open_interest=market.get('open_interest'),
+                        open_interest=None,  # SDK does not provide this field
                         price_history=[current_price]
                     )
                     self.markets_data[market_id] = market_data

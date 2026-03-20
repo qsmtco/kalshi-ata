@@ -38,6 +38,11 @@ class CircuitBreaker:
     ERROR_RESET_THRESHOLD = 0.05  # 5%
     
     def __init__(self, state_file: str = "data/circuit_breaker.json"):
+        # Convert relative path to absolute based on script location
+        if not os.path.isabs(state_file):
+            script_dir = os.path.dirname(os.path.abspath(__file__))
+            project_root = os.path.dirname(script_dir)  # src/ -> project root
+            state_file = os.path.join(project_root, state_file)
         self.state_file = state_file
         self.state = CircuitState.ACTIVE
         self.state_since = datetime.now()

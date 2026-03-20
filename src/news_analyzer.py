@@ -19,13 +19,19 @@ class NewsSentimentAnalyzer:
         self.base_url = NEWS_API_BASE_URL
         self.session = requests.Session()
 
-        # Keywords relevant to Kalshi markets (political, economic, events)
+        # Default keywords for Kalshi markets - expanded to cover gaming, sports, and politics
+        # These are used when market-specific keywords aren't provided
         self.keywords = [
+            # Gaming/Esports (primary market type)
+            'esports', 'gaming', 'Valorant', 'CS2', 'CS:GO', 'League of Legends',
+            'Dota 2', 'Overwatch', 'Call of Duty', 'PUBG', 'Fortnite',
+            'JDG', 'JD Gaming', 'Bilibili Gaming', 'T1', 'G2 Esports', 'Fnatic',
+            'basketball', 'NBA', 'football', 'NFL', 'soccer', 'Premier League',
+            'Champions League', 'La Liga', 'Serie A', 'Bundesliga', 'Feyenoord', 'Ajax',
+            # Political/Economic (secondary)
             'election', 'president', 'senate', 'congress', 'federal reserve',
             'economy', 'inflation', 'unemployment', 'GDP', 'policy',
-            'Supreme Court', 'court', 'ruling', 'decision', 'vote',
-            'political', 'government', 'administration', 'democrat', 'republican',
-            'market', 'stock', 'trading', 'finance', 'economic'
+            'Supreme Court', 'court', 'ruling', 'decision', 'vote'
         ]
 
     def fetch_news(self, query: str = None, days_back: int = 1) -> List[Dict[str, Any]]:
@@ -198,23 +204,101 @@ class NewsSentimentAnalyzer:
             }
         }
 
-    def get_market_relevant_news(self, market_keywords: List[str] = None) -> Dict[str, Any]:
+    def extract_keywords_from_markets(self, markets: List[Dict[str, Any]]) -> List[str]:
+        """
+        Extract relevant keywords from market titles for news searching.
+        
+        Parses market titles like "JD Gaming vs Bilibili Gaming Winner?"
+        into search-friendly keywords like ["JD Gaming", "Bilibili Gaming", "gaming"].
+        
+        Args:
+            markets: List of market dicts with 'title' field
+            
+        Returns:
+            List of extracted keywords for news search
+        """
+        extracted = []
+        seen = set()
+        
+        for market in markets[:20]:  # Limit to first 20 markets
+            title = market.get('title', '')
+            if not title:
+                continue
+                
+            # Remove common market title suffixes
+            # e.g., "Will JD Gaming win vs Bilibili Gaming?" -> "JD Gaming win vs Bilibili Gaming"
+            title_clean = re.sub(r'^(Will|Shall|Does|Is)\s+', '', title, flags=re.IGNORECASE)
+            title_clean = re.sub(r'\s*(\?|Winner|Loser|lose|win|vs\.?|versus)\s*$', '', title_clean, flags=re.IGNORECASE)
+            title_clean = re.sub(r'\s*(Winner|Loser)$', '', title_clean, flags=re.IGNORECASE)
+            
+            # Split on "vs", "at", "-" to get team/player names
+            parts = re.split(r'\s+(?:vs\.?|versus|at|vs)\s+', title_clean, flags=re.IGNORECASE)
+            
+            for part in parts:
+                # Clean each part
+                part = part.strip()
+                # Remove parenthetical content
+                part = re.sub(r'\s*\([^)]*\)', '', part)
+                part = part.strip()
+                
+                if len(part) >= 3 and part.lower() not in seen:
+                    seen.add(part.lower())
+                    extracted.append(part)
+            
+            # Also add broader category keywords based on title content
+            title_lower = title.lower()
+            if 'basketball' in title_lower or 'nba' in title_lower:
+                self._add_if_new(extracted, seen, 'NBA')
+                self._add_if_new(extracted, seen, 'basketball')
+            if 'football' in title_lower or 'nfl' in title_lower:
+                self._add_if_new(extracted, seen, 'NFL')
+                self._add_if_new(extracted, seen, 'football')
+            if 'soccer' in title_lower or 'premier league' in title_lower:
+                self._add_if_new(extracted, seen, 'soccer')
+                self._add_if_new(extracted, seen, 'Premier League')
+            if 'cs2' in title_lower or 'cs:go' in title_lower or 'valorant' in title_lower:
+                self._add_if_new(extracted, seen, 'esports')
+                self._add_if_new(extracted, seen, 'Valorant')
+                self._add_if_new(extracted, seen, 'CS2')
+            if 'league of legends' in title_lower:
+                self._add_if_new(extracted, seen, 'League of Legends')
+                self._add_if_new(extracted, seen, 'LoL')
+        
+        logger.info(f"Extracted {len(extracted)} keywords from market titles: {extracted[:5]}...")
+        return extracted
+
+    def _add_if_new(self, keywords: List[str], seen: set, word: str) -> None:
+        """Helper to add keyword if not already present."""
+        if word.lower() not in seen:
+            seen.add(word.lower())
+            keywords.append(word)
+
+    def get_market_relevant_news(self, market_keywords: List[str] = None, markets: List[Dict[str, Any]] = None) -> Dict[str, Any]:
         """
         Get news specifically relevant to Kalshi markets.
 
         Args:
-            market_keywords: Market-specific keywords
+            market_keywords: Market-specific keywords (optional)
+            markets: Market list to extract keywords from (optional, used if keywords empty)
 
         Returns:
             News sentiment analysis for market relevance
         """
-        if market_keywords:
-            # Search for market-specific news
-            query = ' OR '.join(f'"{kw}"' for kw in market_keywords)
-            articles = self.fetch_news(query=query, days_back=2)
-        else:
-            # General news search
-            articles = self.fetch_news(days_back=1)
+        # Determine keywords to use: provided > extracted from markets > defaults
+        if not market_keywords and markets:
+            # Dynamically extract keywords from market titles
+            market_keywords = self.extract_keywords_from_markets(markets)
+        
+        if not market_keywords:
+            # Use expanded default keywords as fallback
+            market_keywords = self.keywords
+        
+        # Build search query from keywords (limit to 5 to avoid overly broad search)
+        query_terms = market_keywords[:5]
+        query = ' OR '.join(f'"{kw}"' for kw in query_terms)
+        
+        logger.info(f"Fetching news with query: {query[:80]}...")
+        articles = self.fetch_news(query=query, days_back=2)
 
         sentiment_analysis = self.analyze_news_sentiment(articles)
 
@@ -222,7 +306,7 @@ class NewsSentimentAnalyzer:
         sentiment_analysis.update({
             'timestamp': datetime.now().isoformat(),
             'source': 'NewsAPI',
-            'query_used': market_keywords or self.keywords[:5]
+            'query_used': query_terms
         })
 
         logger.info(f"Market news sentiment: {sentiment_analysis['overall_sentiment']:.3f} "

@@ -180,12 +180,12 @@ class StatisticalArbitrageAnalyzer:
             'cointegration': coint_result,
             'spread_analysis': spread_result,
             'market1': {
-                'id': market1_data.get('id'),
+                'market_id': market1_data.get('market_id'),
                 'title': market1_data.get('title'),
                 'current_price': market1_data.get('current_price')
             },
             'market2': {
-                'id': market2_data.get('id'),
+                'market_id': market2_data.get('market_id'),
                 'title': market2_data.get('title'),
                 'current_price': market2_data.get('current_price')
             }
@@ -219,7 +219,7 @@ class StatisticalArbitrageAnalyzer:
 
                     if analysis['arbitrage_opportunity']:
                         opportunities.append(analysis)
-                        logger.info(f"Arbitrage opportunity found: {market1['id']} vs {market2['id']} "
+                        logger.info(f"Arbitrage opportunity found: {market1.get('market_id')} vs {market2.get('market_id')} "
                                   f"(z-score: {analysis['z_score']:.2f})")
 
                 except Exception as e:

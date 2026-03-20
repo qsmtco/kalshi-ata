@@ -1,15 +1,23 @@
 import sqlite3
+import os
 from typing import Any, Dict, List
 
 DEFAULTS = {
-    'kellyFraction': 0.5,
-    'maxPositionSizePct': 0.1,
-    'stopLossPct': 0.05,
-    'takeProfitPct': 0.1,
-    'newsSentimentThreshold': 0.6,
-    'statArbitrageThreshold': 0.05,
-    'volatilityThreshold': 0.1,
-    'tradeIntervalSeconds': 60
+    'kelly_fraction': 0.5,
+    'max_position_size_pct': 0.1,
+    'stop_loss_pct': 0.05,
+    'take_profit_pct': 0.1,
+    'news_sentiment_threshold': 0.6,
+    'stat_arbitrage_threshold': 0.05,
+    'volatility_threshold': 0.1,
+    'trade_interval_seconds': 60,
+    # Strategy enables
+    'news_sentiment_enabled': True,
+    'statistical_arbitrage_enabled': False,
+    'volatility_based_enabled': False,
+    # Notifications
+    'telegram_notifications': True,
+    'market_data_update_interval': 60,
 }
 
 GUARDRAILS = {
@@ -25,9 +33,39 @@ GUARDRAILS = {
 
 class SettingsManager:
     def __init__(self, db_path='data/kalshi.db'):
+        # Convert relative path to absolute based on script location
+        if not os.path.isabs(db_path):
+            script_dir = os.path.dirname(os.path.abspath(__file__))
+            project_root = os.path.dirname(script_dir)  # src/ -> project root
+            db_path = os.path.join(project_root, db_path)
         self.db = sqlite3.connect(db_path)
         self.create_tables()
         self.ensure_defaults()
+        # Listener support
+        self._change_listeners = []
+    
+    def add_change_listener(self, callback):
+        """Register a callback to be called when settings change."""
+        if callback not in self._change_listeners:
+            self._change_listeners.append(callback)
+    
+    def _notify_listeners(self, changes):
+        """Notify all registered listeners of settings changes."""
+        for callback in self._change_listeners:
+            try:
+                callback(changes)
+            except Exception:
+                pass
+    
+    @property
+    def settings(self):
+        """Return all settings as an object with attributes."""
+        class Settings:
+            pass
+        s = Settings()
+        for k, v in self.get_settings().items():
+            setattr(s, k, v)
+        return s
 
     def create_tables(self):
         self.db.execute('''

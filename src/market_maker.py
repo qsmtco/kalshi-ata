@@ -40,6 +40,11 @@ class MarketMaker:
     MAX_ORDERS_PER_MARKET = 3  # Limit orders per market
     
     def __init__(self, api, db_path: str = "data/kalshi.db"):
+        # Convert relative path to absolute based on script location
+        if not os.path.isabs(db_path):
+            script_dir = os.path.dirname(os.path.abspath(__file__))
+            project_root = os.path.dirname(script_dir)
+            db_path = os.path.join(project_root, db_path)
         self.api = api
         self.db_path = db_path
         self.positions: Dict[str, MarketMakingPosition] = {}

@@ -1,5 +1,6 @@
 import logging
 import time
+import os
 import requests
 
 from config import (
@@ -8,6 +9,10 @@ from config import (
     MAX_RETRIES,
     RETRY_DELAY_SECONDS,
 )
+
+# Demo vs production URL per Kalshi docs: https://docs.kalshi.com/getting_started/demo_env
+KALSHI_DEMO_URL = "https://demo-api.kalshi.co/trade-api/v2"
+KALSHI_PROD_URL = "https://api.elections.kalshi.com/trade-api/v2"
 
 class KalshiAPI:
     def __init__(
@@ -18,7 +23,18 @@ class KalshiAPI:
         retry_delay=RETRY_DELAY_SECONDS,
     ):
         self.api_key = api_key or KALSHI_API_KEY
-        self.base_url = base_url or KALSHI_API_BASE_URL
+        
+        # Check KALSHI_DEMO_MODE env var for demo vs production URL
+        # Docs: https://docs.kalshi.com/getting_started/demo_env
+        demo_mode = os.environ.get('KALSHI_DEMO_MODE', 'true').lower() == 'true'
+        if base_url:
+            self.base_url = base_url  # Explicit override
+        elif demo_mode:
+            self.base_url = KALSHI_DEMO_URL
+            logging.info(f"KalshiAPI: Using DEMO mode ({KALSHI_DEMO_URL})")
+        else:
+            self.base_url = KALSHI_API_BASE_URL or KALSHI_PROD_URL
+        
         self.logger = logging.getLogger(__name__)
         self.max_retries = max_retries
         self.retry_delay = retry_delay
