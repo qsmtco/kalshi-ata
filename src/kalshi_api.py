@@ -3,6 +3,7 @@ import time
 import os
 import requests
 
+from typing import Any, Dict, List, Optional
 from config import (
     KALSHI_API_KEY,
     KALSHI_API_BASE_URL,
@@ -100,6 +101,57 @@ class KalshiAPI:
 
     def get_events(self, params=None):
         return self._handle_request("GET", "/events", params=params or {})
+
+    def get_trades(self, params=None):
+        """
+        Fetch trades for a market (or all markets if no ticker filter).
+        Paginated — call repeatedly with cursor until cursor is empty.
+
+        Args:
+            params: dict with optional keys:
+                ticker (str)     — filter by market ticker
+                min_ts (int)     — Unix timestamp, filter trades after this
+                max_ts (int)     — Unix timestamp, filter trades before this
+                limit (int)      — 1-1000, default 100
+                cursor (str)     — pagination cursor from previous response
+
+        Returns:
+            {"trades": [...], "cursor": "..."} or None on failure.
+        """
+        return self._handle_request("GET", "/markets/trades", params=params or {})
+
+    def get_orderbook(self, ticker: str, depth: int = 10) -> Optional[Dict[str, Any]]:
+        """
+        Fetch the current L2 order book for a Kalshi market.
+
+        In Kalshi binary markets, the orderbook shows BIDS ONLY.
+        A YES bid at $0.07 is equivalent to a NO ask at $0.93,
+        so no_asks = mirror of yes_bids and vice versa.
+
+        Response shape:
+            {
+              "orderbook_fp": {
+                "yes_bids": [{"price_dollars": float, "quantity": float, "count": int}, ...],
+                "no_bids":  [{"price_dollars": float, "quantity": float, "count": int}, ...],
+                "yes_asks": [],
+                "no_asks":  [],
+                "last_yes_bid": float,
+                "last_no_bid":  float,
+              }
+            }
+
+        Args:
+            ticker: Market ticker (e.g., "KXSECPRESSMENTION-25MAR20-PHONECALL")
+            depth:  Number of price levels to return (1-100, 0=all). Default 10.
+
+        Returns:
+            Orderbook dict or None on failure.
+        """
+        return self._handle_request(
+            "GET",
+            f"/markets/{ticker}/orderbook",
+            params={"depth": depth} if depth > 0 else {},
+        )
 
     # ---- Portfolio endpoints ----
     def get_account_balance(self):

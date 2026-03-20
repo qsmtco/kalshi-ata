@@ -2,9 +2,20 @@
 """Simplified risk management module for Phase 2 - Kalshi trading bot."""
 
 import logging
+import time
 import numpy as np
-from typing import Dict, Any
-from config import BANKROLL, MAX_POSITION_SIZE_PERCENTAGE, STOP_LOSS_PERCENTAGE
+from typing import Dict, Any, Optional
+from config import (
+    BANKROLL, MAX_POSITION_SIZE_PERCENTAGE, STOP_LOSS_PERCENTAGE,
+    KYLE_LAMBDA_ENABLED, KYLE_MIN_TRADES, KYLE_R2_THRESHOLD,
+    KYLE_LAMBDA_THRESHOLD, KYLE_POSITION_SCALE_HIGH, KYLE_POSITION_SCALE_MODERATE,
+    KYLE_REFRESH_INTERVAL_SEC,
+    HAWKES_ENABLED, HAWKES_MIN_TRADES, HAWKES_BR_THRESHOLD,
+    HAWKES_SKIP_THRESHOLD, HAWKES_REFRESH_INTERVAL_SEC,
+    VPIN_ENABLED, VPIN_M_BUCKETS, VPIN_MIN_BUCKETS,
+    VPIN_HIGH_THRESHOLD, VPIN_EXTREME_THRESHOLD, VPIN_SKIP_THRESHOLD,
+    VPIN_REFRESH_INTERVAL_SEC,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -17,6 +28,12 @@ class RiskManager:
         self._closed_trade_count = 0  # Cache for trade count
         self._db_path = db_path or 'data/kalshi.db'
         self._load_win_stats_cache()  # Pre-load on init
+        # Kyle lambda cache: ticker -> {"result": {...}, "fetched_at": float}
+        self._kyle_cache: Dict[str, Dict[str, Any]] = {}
+        # Hawkes branching ratio cache: ticker -> {"result": {...}, "fetched_at": float}
+        self._hawkes_cache: Dict[str, Dict[str, Any]] = {}
+        # VPIN cache: ticker -> {"result": {...}, "fetched_at": float}
+        self._vpin_cache: Dict[str, Dict[str, Any]] = {}
 
     def _load_win_stats_cache(self) -> None:
         """Load win stats from database on init for performance."""
@@ -300,3 +317,357 @@ class RiskManager:
             'total_return_pct': ((self.current_bankroll / self.initial_bankroll) - 1) * 100,
             'risk_metrics': metrics
         }
+
+    # =========================================================================
+    # KYLE'S LAMBDA — Order Flow Impact Signal
+    # =========================================================================
+
+    def check_kyle_lambda(
+        self,
+        ticker: str,
+        kyle_estimator,
+        force_refresh: bool = False,
+    ) -> Dict[str, Any]:
+        """
+        Check Kyle's lambda for a market — estimates price impact of order flow.
+
+        High λ or high R² → informed traders present → reduce position size.
+
+        Results are cached for KYLE_REFRESH_INTERVAL_SEC to avoid excessive API calls.
+
+        Args:
+            ticker:          Kalshi market ticker
+            kyle_estimator:  KalshiKyleLambda instance (from kyle_lambda module)
+            force_refresh:   Skip cache and fetch fresh estimate
+
+        Returns:
+            {
+                "position_scale":  float,  # 0.0–1.0 multiplier for position size
+                "signal":          str,    # "high" | "moderate" | "normal"
+                "lambda":          float,
+                "r_squared":       float,
+                "is_significant":  bool,
+                "cached":           bool,
+                "interpretation":   str,
+            }
+        """
+        if not KYLE_LAMBDA_ENABLED:
+            return {
+                "position_scale": 1.0,
+                "signal": "disabled",
+                "lambda": 0.0,
+                "r_squared": 0.0,
+                "is_significant": False,
+                "cached": False,
+                "interpretation": "Kyle lambda check disabled",
+            }
+
+        # ---- Check cache ----
+        now = time.time()
+        cached = self._kyle_cache.get(ticker)
+        if (cached is not None
+                and not force_refresh
+                and (now - cached["fetched_at"]) < KYLE_REFRESH_INTERVAL_SEC):
+            return {
+                "position_scale": cached["result"].get("position_scale", 1.0),
+                "signal": cached["result"].get("signal", "normal"),
+                "lambda": cached["result"].get("lambda", 0.0),
+                "r_squared": cached["result"].get("r_squared", 0.0),
+                "is_significant": cached["result"].get("is_significant", False),
+                "cached": True,
+                "interpretation": cached["result"].get("interpretation", ""),
+            }
+
+        # ---- Fetch fresh estimate ----
+        try:
+            raw = kyle_estimator.estimate_for_market(ticker)
+        except Exception as e:
+            logger.warning(f"Kyle lambda fetch failed for {ticker}: {e}")
+            return {
+                "position_scale": 1.0,
+                "signal": "error",
+                "lambda": 0.0,
+                "r_squared": 0.0,
+                "is_significant": False,
+                "cached": False,
+                "interpretation": f"Error: {e}",
+            }
+
+        if "error" in raw and raw.get("lambda", 0) == 0:
+            logger.debug(f"Kyle lambda insufficient data for {ticker}: {raw.get('error')}")
+            return {
+                "position_scale": 1.0,
+                "signal": "no_data",
+                "lambda": 0.0,
+                "r_squared": 0.0,
+                "is_significant": False,
+                "cached": False,
+                "interpretation": raw.get("error", "insufficient data"),
+            }
+
+        lam = raw.get("lambda", 0.0)
+        r2 = raw.get("r_squared", 0.0)
+        is_sig = raw.get("is_significant", False)
+        interpretation = raw.get("interpretation", "")
+
+        # ---- Determine signal level and position scale ----
+        abs_lambda = abs(lam)
+        position_scale = 1.0
+        signal = "normal"
+
+        if is_sig and abs_lambda > KYLE_LAMBDA_THRESHOLD and r2 > KYLE_R2_THRESHOLD:
+            signal = "high"
+            position_scale = KYLE_POSITION_SCALE_HIGH
+            logger.warning(
+                f"Kyle λ HIGH: ticker={ticker} λ={lam:.6f} R²={r2:.4f} "
+                f"→ scaling position to {position_scale:.0%}"
+            )
+        elif abs_lambda > KYLE_LAMBDA_THRESHOLD:
+            signal = "moderate"
+            position_scale = KYLE_POSITION_SCALE_MODERATE
+            logger.info(
+                f"Kyle λ MODERATE: ticker={ticker} λ={lam:.6f} R²={r2:.4f} "
+                f"→ scaling position to {position_scale:.0%}"
+            )
+
+        result = {
+            "position_scale": position_scale,
+            "signal": signal,
+            "lambda": lam,
+            "r_squared": r2,
+            "is_significant": is_sig,
+            "cached": False,
+            "interpretation": interpretation,
+        }
+
+        # ---- Update cache ----
+        self._kyle_cache[ticker] = {
+            "result": result,
+            "fetched_at": now,
+        }
+
+        return result
+
+    # =========================================================================
+    # HAWKES PROCESS — Order Flow Clustering Signal
+    # =========================================================================
+
+    def check_hawkes(
+        self,
+        ticker: str,
+        hawkes_estimator,
+        force_refresh: bool = False,
+    ) -> Dict[str, Any]:
+        """
+        Check Hawkes branching ratio for a market — estimates order flow clustering.
+
+        High BR (>0.7) → trades cluster (momentum / informed flow) → caution
+        Very high BR (>0.8) → skip trade entirely
+
+        Results are cached for HAWKES_REFRESH_INTERVAL_SEC.
+
+        Args:
+            ticker:           Kalshi market ticker
+            hawkes_estimator: KalshiHawkesEstimator instance (from hawkes_process module)
+            force_refresh:    Skip cache and fetch fresh estimate
+
+        Returns:
+            {
+                "signal":           str,    # "high" | "moderate" | "normal" | "disabled"
+                "skip_trade":       bool,   # True if BR > HAWKES_SKIP_THRESHOLD
+                "branching_ratio":  float,
+                "n_events":         int,
+                "cached":           bool,
+                "interpretation":   str,
+            }
+        """
+        if not HAWKES_ENABLED:
+            return {
+                "signal": "disabled",
+                "skip_trade": False,
+                "branching_ratio": 0.0,
+                "n_events": 0,
+                "cached": False,
+                "interpretation": "Hawkes check disabled",
+            }
+
+        # ---- Check cache ----
+        now = time.time()
+        cached = self._hawkes_cache.get(ticker)
+        if (cached is not None
+                and not force_refresh
+                and (now - cached["fetched_at"]) < HAWKES_REFRESH_INTERVAL_SEC):
+            result = cached["result"].copy()
+            result["cached"] = True
+            return result
+
+        # ---- Fetch fresh estimate ----
+        try:
+            raw = hawkes_estimator.estimate_for_market(ticker)
+        except Exception as e:
+            logger.warning(f"Hawkes fetch failed for {ticker}: {e}")
+            return {
+                "signal": "error",
+                "skip_trade": False,
+                "branching_ratio": 0.0,
+                "n_events": 0,
+                "cached": False,
+                "interpretation": f"Error: {e}",
+            }
+
+        if "error" in raw and raw.get("branching_ratio", 0) == 0:
+            logger.debug(f"Hawkes insufficient data for {ticker}: {raw.get('error')}")
+            return {
+                "signal": "no_data",
+                "skip_trade": False,
+                "branching_ratio": 0.0,
+                "n_events": raw.get("n_events", 0),
+                "cached": False,
+                "interpretation": raw.get("error", "insufficient data"),
+            }
+
+        br = raw.get("branching_ratio", 0.0)
+        n_events = raw.get("n_events", 0)
+        interpretation = raw.get("interpretation", "")
+
+        # ---- Determine signal level ----
+        if br >= HAWKES_SKIP_THRESHOLD:
+            signal = "high"
+            skip_trade = True
+            logger.warning(
+                f"Hawkes BR HIGH: {ticker} BR={br:.4f} → SKIPPING trade"
+            )
+        elif br >= HAWKES_BR_THRESHOLD:
+            signal = "moderate"
+            skip_trade = False
+            logger.info(
+                f"Hawkes BR MODERATE: {ticker} BR={br:.4f} → caution"
+            )
+        else:
+            signal = "normal"
+            skip_trade = False
+
+        result = {
+            "signal": signal,
+            "skip_trade": skip_trade,
+            "branching_ratio": br,
+            "n_events": n_events,
+            "cached": False,
+            "interpretation": interpretation,
+        }
+
+        # ---- Update cache ----
+        self._hawkes_cache[ticker] = {
+            "result": result,
+            "fetched_at": now,
+        }
+
+        return result
+
+    # =========================================================================
+    # VPIN — Volume-Synchronized Probability of Informed Trading
+    # =========================================================================
+
+    def check_vpin(
+        self,
+        ticker: str,
+        vpin_estimator,
+        force_refresh: bool = False,
+    ) -> Dict[str, Any]:
+        """
+        Check VPIN for a market — real-time adverse selection detector.
+
+        VPIN > 0.70 preceded the 2010 Flash Crash by ~1 hour.
+        VPIN > 0.80 → extreme toxicity → skip trades entirely.
+
+        Results are cached for VPIN_REFRESH_INTERVAL_SEC.
+
+        Args:
+            ticker:         Kalshi market ticker
+            vpin_estimator: KalshiVPINEstimator instance (from vpin module)
+            force_refresh:  Skip cache and fetch fresh estimate
+
+        Returns:
+            {
+                "signal":          str,    # "normal" | "elevated" | "high" | "extreme"
+                "skip_trade":      bool,   # True if VPIN > VPIN_SKIP_THRESHOLD
+                "vpin":            float,  # VPIN value [0, 1]
+                "volume_imb":      float,  # Overall |buy-sell|/total volume
+                "n_buckets":       int,
+                "n_trades":        int,
+                "cached":          bool,
+                "interpretation":  str,
+            }
+        """
+        if not VPIN_ENABLED:
+            return {
+                "signal": "disabled",
+                "skip_trade": False,
+                "vpin": 0.0,
+                "volume_imb": 0.0,
+                "n_buckets": 0,
+                "n_trades": 0,
+                "cached": False,
+                "interpretation": "VPIN check disabled",
+            }
+
+        # ---- Check cache ----
+        now = time.time()
+        cached = self._vpin_cache.get(ticker)
+        if (cached is not None
+                and not force_refresh
+                and (now - cached["fetched_at"]) < VPIN_REFRESH_INTERVAL_SEC):
+            result = cached["result"].copy()
+            result["cached"] = True
+            return result
+
+        # ---- Fetch fresh estimate ----
+        try:
+            raw = vpin_estimator.estimate_for_market(ticker)
+        except Exception as e:
+            logger.warning(f"VPIN fetch failed for {ticker}: {e}")
+            return {
+                "signal": "error",
+                "skip_trade": False,
+                "vpin": 0.0,
+                "volume_imb": 0.0,
+                "n_buckets": 0,
+                "n_trades": 0,
+                "cached": False,
+                "interpretation": f"Error: {e}",
+            }
+
+        vpin     = raw.get("vpin", 0.0)
+        vol_imb  = raw.get("volume_imbalance", 0.0)
+        signal   = raw.get("signal", "no_data")
+        n_buckets = raw.get("n_buckets", 0)
+        n_trades = raw.get("n_trades", 0)
+        interp   = raw.get("interpretation", "")
+
+        skip_trade = vpin >= VPIN_SKIP_THRESHOLD
+
+        if signal in ("high", "extreme") or skip_trade:
+            lvl = "EXTREME" if signal == "extreme" else "HIGH"
+            logger.warning(
+                f"VPIN {lvl}: {ticker} VPIN={vpin:.4f} → "
+                f"{'SKIP trade' if skip_trade else 'caution'}"
+            )
+
+        result = {
+            "signal": signal,
+            "skip_trade": skip_trade,
+            "vpin": vpin,
+            "volume_imb": vol_imb,
+            "n_buckets": n_buckets,
+            "n_trades": n_trades,
+            "cached": False,
+            "interpretation": interp,
+        }
+
+        # ---- Update cache ----
+        self._vpin_cache[ticker] = {
+            "result": result,
+            "fetched_at": now,
+        }
+
+        return result
