@@ -5,7 +5,7 @@ const path = require('path');
 require('dotenv').config();
 
 class BotInterface {
-    constructor(pythonBotPath, port = 3001) {
+    constructor(pythonBotPath, port = 3050) {
         this.pythonBotPath = pythonBotPath;
         this.port = port;
         this.app = express();
@@ -567,7 +567,7 @@ module.exports = BotInterface;
 // Example usage
 if (require.main === module) {
     const pythonBotPath = process.env.PYTHON_BOT_PATH || path.join(__dirname, 'src/main.py');
-    const port = process.env.INTERFACE_PORT || 3001;
+    const port = process.env.INTERFACE_PORT || 3050;
     
     const botInterface = new BotInterface(pythonBotPath, port);
     

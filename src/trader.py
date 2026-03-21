@@ -2,8 +2,8 @@ import pandas as pd
 import numpy as np
 import logging
 import time
-from typing import List, Dict, Any
-from config import BANKROLL, NEWS_SENTIMENT_THRESHOLD, STAT_ARBITRAGE_THRESHOLD, VOLATILITY_THRESHOLD, MAX_POSITION_SIZE_PERCENTAGE, STOP_LOSS_PERCENTAGE, PAPER_TRADING, MARKET_MAKING_ENABLED
+from typing import List, Dict, Any, Optional
+from config import BANKROLL, NEWS_SENTIMENT_THRESHOLD, STAT_ARBITRAGE_THRESHOLD, VOLATILITY_THRESHOLD, MAX_POSITION_SIZE_PERCENTAGE, STOP_LOSS_PERCENTAGE, PAPER_TRADING, MARKET_MAKING_ENABLED, KYLE_REFRESH_INTERVAL_SEC, HAWKES_REFRESH_INTERVAL_SEC, VPIN_REFRESH_INTERVAL_SEC
 from news_analyzer import NewsSentimentAnalyzer
 from arbitrage_analyzer import StatisticalArbitrageAnalyzer
 from volatility_analyzer import VolatilityAnalyzer

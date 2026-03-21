@@ -13,7 +13,7 @@ Orchestrates the full agent cycle:
 7. Apply via API
 8. Log decisions
 
-Usage: python3 agent_loop.py [--base-url http://localhost:3001]
+Usage: python3 agent_loop.py [--base-url http://localhost:3050]
 """
 
 import argparse
@@ -268,7 +268,7 @@ def main():
     parser = argparse.ArgumentParser(description='K-ATA Adaptive Agent')
     parser.add_argument(
         '--base-url',
-        default=os.environ.get('BOT_BASE_URL', 'http://localhost:3001'),
+        default=os.environ.get('BOT_BASE_URL', 'http://localhost:3050'),
         help='Bot interface base URL'
     )
     parser.add_argument(

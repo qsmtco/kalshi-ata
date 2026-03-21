@@ -56,7 +56,7 @@ The system comprises:
 │  • POST /api/settings (adjustments)                      │
 │  • Logs to data/agent.db                                 │
 └─────────────────────────────┬───────────────────────────────┘
-                              │ HTTP localhost:3001
+                              │ HTTP localhost:3050
                               ▼
 ┌─────────────────────────────────────────────────────────────┐
 │             Bot Interface Server (bot_interface.js)        │
@@ -260,7 +260,7 @@ GROUP BY market_id, strategy, action;
 ### 4.1 Base URL
 
 ```
-http://localhost:3001
+http://localhost:3050
 ```
 
 ### 4.2 Global Response Format
@@ -983,13 +983,13 @@ agent_adjustments_total{parameter="kellyFraction"} 12
 ### 10.2 Startup Order
 
 1. `scripts/setup_db.sh` - initialize SQLite files
-2. `node bot_interface.js &` - start API server on :3001
+2. `node bot_interface.js &` - start API server on :3050
 3. `python src/main.py &` - or use `/api/start-trading` to spawn
 4. `cron add "*/6 * * * *" agent=Qaster task="Run agent cycle"`
 
 **Verification:**
 ```bash
-curl http://localhost:3001/api/health
+curl http://localhost:3050/api/health
 # Should return {"status":"healthy",...}
 ```
 

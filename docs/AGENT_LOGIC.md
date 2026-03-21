@@ -324,7 +324,7 @@ Agent is configured via environment variables:
 
 ```bash
 # Bot interface location
-BASE_URL = os.getenv('BASE_URL', 'http://localhost:3001')
+BASE_URL = os.getenv('BASE_URL', 'http://localhost:3050')
 
 # Database locations
 KALSHI_DB = '/home/q/projects/KALSHI – adaptive – agent/data/kalshi.db'

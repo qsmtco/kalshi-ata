@@ -247,7 +247,7 @@ class TestAPIEndpoints(unittest.TestCase):
     def test_health_endpoint(self):
         """Test health check endpoint"""
         try:
-            response = requests.get('http://localhost:3001/health', timeout=5)
+            response = requests.get('http://localhost:3050/health', timeout=5)
             self.assertEqual(response.status_code, 200)
             
             data = response.json()
@@ -259,7 +259,7 @@ class TestAPIEndpoints(unittest.TestCase):
     def test_status_endpoint(self):
         """Test status endpoint"""
         try:
-            response = requests.get('http://localhost:3001/api/status', timeout=5)
+            response = requests.get('http://localhost:3050/api/status', timeout=5)
             self.assertEqual(response.status_code, 200)
             
             data = response.json()
@@ -272,7 +272,7 @@ class TestAPIEndpoints(unittest.TestCase):
     def test_positions_endpoint(self):
         """Test positions endpoint"""
         try:
-            response = requests.get('http://localhost:3001/api/positions', timeout=5)
+            response = requests.get('http://localhost:3050/api/positions', timeout=5)
             self.assertEqual(response.status_code, 200)
             
             data = response.json()
@@ -283,7 +283,7 @@ class TestAPIEndpoints(unittest.TestCase):
     def test_balance_endpoint(self):
         """Test balance endpoint"""
         try:
-            response = requests.get('http://localhost:3001/api/balance', timeout=5)
+            response = requests.get('http://localhost:3050/api/balance', timeout=5)
             self.assertEqual(response.status_code, 200)
             
             data = response.json()
@@ -295,7 +295,7 @@ class TestAPIEndpoints(unittest.TestCase):
     def test_config_endpoint(self):
         """Test configuration endpoint"""
         try:
-            response = requests.get('http://localhost:3001/api/config', timeout=5)
+            response = requests.get('http://localhost:3050/api/config', timeout=5)
             self.assertEqual(response.status_code, 200)
             
             data = response.json()
@@ -391,7 +391,7 @@ def run_system_validation():
         time.sleep(3)  # Give server time to start
         
         # Test health endpoint
-        response = requests.get('http://localhost:3001/health', timeout=5)
+        response = requests.get('http://localhost:3050/health', timeout=5)
         if response.status_code == 200:
             print("   ✓ API server started and responding")
         else:

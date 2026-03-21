@@ -8,7 +8,7 @@ Per SAFETY_GUARDRAILS.md Section 3:
 - API error rate > 20% -> PAUSED_ERROR
 - Auto-reset PAUSED_ERROR after 5 min if error rate < 5%
 
-Usage: python3 safety_check.py [--base-url http://localhost:3001]
+Usage: python3 safety_check.py [--base-url http://localhost:3050]
 """
 
 import argparse
@@ -114,7 +114,7 @@ def main():
     parser = argparse.ArgumentParser(description='Circuit Breaker Monitor')
     parser.add_argument(
         '--base-url', 
-        default=os.environ.get('BOT_BASE_URL', 'http://localhost:3001'),
+        default=os.environ.get('BOT_BASE_URL', 'http://localhost:3050'),
         help='Bot interface base URL'
     )
     parser.add_argument(

@@ -75,7 +75,7 @@ python3 main.py &
 ### 5. Test Installation
 ```bash
 # Check if services are running
-curl http://localhost:3001/health
+curl http://localhost:3050/health
 
 # Send /start to your Telegram bot
 ```
@@ -146,7 +146,7 @@ RUN pip3 install -r requirements.txt
 # Copy application
 COPY . .
 
-EXPOSE 3001
+EXPOSE 3050
 
 CMD ["node", "telegram_ui/bot_interface.js"]
 ```
@@ -158,7 +158,7 @@ services:
   kalshi-bot:
     build: .
     ports:
-      - "3001:3001"
+      - "3050:3050"
     environment:
       - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
       - KALSHI_API_KEY=${KALSHI_API_KEY}
@@ -226,7 +226,7 @@ sudo ufw allow 80
 sudo ufw allow 443
 
 # Allow bot interface (local only)
-sudo ufw allow from 127.0.0.1 to any port 3001
+sudo ufw allow from 127.0.0.1 to any port 3050
 ```
 
 ### 2. SSL/TLS Setup (Optional)
@@ -281,7 +281,7 @@ sudo nano /etc/logrotate.d/kalshi-bot
 # health_check.sh
 
 # Check if services are running
-if ! curl -f http://localhost:3001/health > /dev/null 2>&1; then
+if ! curl -f http://localhost:3050/health > /dev/null 2>&1; then
     echo "Bot interface is down, restarting..."
     supervisorctl restart kalshi-bot-interface
 fi
@@ -345,7 +345,7 @@ tar -xzf backup/kalshi-bot-config-YYYYMMDD_HHMMSS.tar.gz
 sudo supervisorctl start all
 
 # Verify functionality
-curl http://localhost:3001/health
+curl http://localhost:3050/health
 ```
 
 ## Performance Optimization
@@ -387,10 +387,10 @@ sudo nano /etc/postgresql/12/main/postgresql.conf
 
 ### Common Issues
 
-1. **Port 3001 already in use:**
+1. **Port 3050 already in use:**
 ```bash
 # Find process using port
-sudo lsof -i :3001
+sudo lsof -i :3050
 
 # Kill process
 sudo kill -9 <PID>
@@ -474,7 +474,7 @@ cd ..
 sudo supervisorctl start all
 
 # Verify functionality
-curl http://localhost:3001/health
+curl http://localhost:3050/health
 ```
 
 ## Support

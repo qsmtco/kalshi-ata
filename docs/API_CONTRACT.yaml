@@ -8,7 +8,7 @@ info:
     url: https://github.com/yllvar/Kalshi-Quant-TeleBot
 
 servers:
-  - url: http://localhost:3001
+  - url: http://localhost:3050
     description: Local development
 
 paths:
