@@ -51,6 +51,96 @@ K-ATA (Kalshi Adaptive Trading Agent) is a self-optimizing quantitative trading 
 
 ---
 
+## The Exit Intelligence Layer — Five Triggers, Zero Ambiguity
+
+> *Most bots know when to enter. K-ATA knows when to leave.*
+
+---
+
+The original K-ATA had a problem: it could open positions but had no disciplined way to close them. A position in a losing trade would sit there indefinitely, bleeding value. A winning position had no take-profit target. Nobody was watching the clock.
+
+This update adds a complete **exit intelligence system** — five independent exit triggers that run every cycle, in priority order, against every open position.
+
+### The Five Exit Triggers
+
+| Trigger | Condition | Priority | Urgency |
+|---------|-----------|----------|---------|
+| **Stop Loss** | Price drops to 60% of entry (-40%) | 1st | High |
+| **Market Close** | Less than 30 minutes until settlement | 1st | High |
+| **Take Profit** | Price rises to 150% of entry (+50%) | 2nd | High |
+| **Probability Shift** | Market moved -25% against your signal thesis | 3rd | High |
+| **Time Exit** | Position open > 24 hours with no profit | 4th | Normal |
+
+The first trigger that fires wins. Stop loss and market close take priority — they're non-negotiable. Take profit and time exit are optimization. Probability shift is the prediction-market-specific guard: if the market's implied probability moves against your thesis, the market is telling you something.
+
+### Why 40% Stop Loss on a 4-Cent Contract?
+
+This was a design question. A $0.04 contract doesn't behave like a stock. The market is pricing 4% implied probability. If it drops to $0.024, that's 3% implied probability — the bet is getting *less* likely, and you're wrong. Getting out at -40% is correct risk management, not overtrading.
+
+### FAK First, Limit Second
+
+When an exit fires, K-ATA tries to sell with a **Fill-And-Kill (FAK)** order — attempt immediate fill at current price, cancel if nobody's there. If FAK fails, it falls back to a **good-till-canceled limit order** that rests on the book. This is how you exit a thin market without burning your entire position into a single counterparty.
+
+---
+
+## Market Selection — The Liquidity Gate
+
+> *K-ATA doesn't trade markets. It trades markets that can actually be traded.*
+
+---
+
+Before this update, K-ATA had a critical bug: it was attempting to place orders in markets with zero liquidity — where `yes_bid = $0.00` and `yes_ask = $1.00`. The API would accept the order and immediately reject it. The bot was burning calls and generating no fills.
+
+The market selection layer fixes this with a **pre-trade gate** that evaluates every candidate market before any order is placed.
+
+### The Pre-Trade Gate
+
+Every potential trade must pass all five checks before K-ATA will touch it:
+
+```
+PRE-TRADE GATE — ALL must pass
+│
+├── 1. Quality Score ≥ 30/100
+│   │   Evaluates: bid presence, spread tightness, volume, time remaining
+│   │
+├── 2. Liquidity Check
+│   │   Rejects: yes_bid = $0.00, spread > 15%, bid too thin for position size
+│   │
+├── 3. Probability Sweet Spot
+│   │   Rejects: price < 25% (fighting consensus) or > 75% (no edge left)
+│   │   Edge lives in the middle — that's where the mispricing is.
+│   │
+├── 4. Time Remaining
+│   │   Rejects: less than 2 hours until market close
+│   │   Skips: markets already closed or about to settle
+│   │
+└── 5. Signal-Market Alignment
+    │   Rejects: when your signal contradicts what the market already prices
+    │   Example: you get a bullish signal but market is already at 90% probability
+    │   → The market already knows. Your signal is stale.
+```
+
+### Why 25%-75% as the Sweet Spot?
+
+If a market is at 90%, the market has already resolved the question in its price. There's no edge left — you're just buying something that's already priced in. Below 25%, the market is saying "this almost certainly won't happen." You'd need extraordinary evidence to justify that bet, and the market is probably right.
+
+The money in prediction markets is in the 25%-75% range — where there's genuine disagreement and real mispricing.
+
+### The Market Quality Score
+
+K-ATA scores every market 0-100 on tradeability across four factors:
+
+| Factor | Weight | What It Measures |
+|--------|--------|-----------------|
+| **Bid Presence** | 0-30 pts | Is there an actual quote? |
+| **Spread Tightness** | 0-30 pts | How wide is the bid-ask spread? |
+| **Volume** | 0-20 pts | Is this market actively traded? |
+| **Time Remaining** | -0 to -20 pts | Does it have life left? |
+
+Markets scoring below 30 are rejected outright. The bot will not force a trade into a bad market.
+
+---
+
 ## System Architecture
 
 ```
@@ -153,6 +243,9 @@ The bot watches multiple markets simultaneously, applies its three trading strat
 | **Rate Limiting**    | ✅ Max 3 changes/day prevents overfitting         | ❌ Not common         |
 | **Market Making**    | ✅ Optional spread capture                        | ❌ Rare               |
 | **Microstructure**   | ✅ VPIN, Hawkes, Kyle, OFI, Almgren-Chriss       | ❌ Virtually none    |
+| **Exit Logic**        | ✅ 5 triggers: stop loss, take profit, time, prob shift, market close | ❌ Usually manual or missing |
+| **Market Selection**  | ✅ Pre-trade liquidity gate + probability sweet spot | ❌ Trades illiquid markets |
+| **Position Tracker**  | ✅ Real-time position state, synced from API on startup | ❌ No local state |
 
 ---
 
@@ -582,7 +675,12 @@ Combined with K-ATA's volatility-adjusted position sizing, the market making mod
 │  Python 3.12          │  SQLite (persistence)               │
 │  Official Kalshi SDK  │  TensorFlow/Transformers (NLP)      │
 │  Pandas/NumPy         │  SciPy (statistics)                 │
-│  Telegram API         │  Express.js (REST + WebSocket)      │
+│  Telegram API         │  Express.js (REST + WebSocket)     │
+│  arch (GARCH)         │  APscheduler (exit scheduling)      │
+│  New modules:                                                 │
+│  • exit_rules.py      — 5-exit-trigger evaluation engine   │
+│  • position_tracker.py — real-time position state manager   │
+│  • market_selector.py — liquidity + quality gate           │
 └─────────────────────────────────────────────────────────────┘
 ```
 
