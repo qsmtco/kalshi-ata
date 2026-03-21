@@ -1,6 +1,6 @@
 {
   "name": "kalshi-tele-bot",
-  "version": "3.0.0",
+  "version": "3.4.0",
   "description": "Kalshi Telegram bot",
   "main": "telegram_ui/telegram_bot.js",
   "scripts": {
