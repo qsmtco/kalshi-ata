@@ -230,6 +230,12 @@ class NewsSentimentAnalyzer:
             title_clean = re.sub(r'^(Will|Shall|Does|Is)\s+', '', title, flags=re.IGNORECASE)
             title_clean = re.sub(r'\s*(\?|Winner|Loser|lose|win|vs\.?|versus)\s*$', '', title_clean, flags=re.IGNORECASE)
             title_clean = re.sub(r'\s*(Winner|Loser)$', '', title_clean, flags=re.IGNORECASE)
+
+            # Remove Kalshi "yes"/"no" prefix — e.g. "yes Draymond Green: 4+" -> "Draymond Green: 4+"
+            title_clean = re.sub(r'^(yes|no)\s+', '', title_clean, flags=re.IGNORECASE)
+
+            # Remove player prop suffixes — e.g. "Draymond Green: 4+" -> "Draymond Green"
+            title_clean = re.sub(r'\s*:\s*[\d.+]+\s*$', '', title_clean)
             
             # Split on "vs", "at", "-" to get team/player names
             parts = re.split(r'\s+(?:vs\.?|versus|at|vs)\s+', title_clean, flags=re.IGNORECASE)
@@ -285,12 +291,10 @@ class NewsSentimentAnalyzer:
             News sentiment analysis for market relevance
         """
         # Determine keywords to use: provided > extracted from markets > defaults
-        if not market_keywords and markets:
-            # Dynamically extract keywords from market titles
-            market_keywords = self.extract_keywords_from_markets(markets)
-        
+        # NOTE: dynamic extraction from market titles is disabled — titles contain
+        # embedded yes/no markers that produce invalid search queries.
+        # Using curated default keywords instead, which cover esports/sports/politics well.
         if not market_keywords:
-            # Use expanded default keywords as fallback
             market_keywords = self.keywords
         
         # Build search query from keywords (limit to 5 to avoid overly broad search)

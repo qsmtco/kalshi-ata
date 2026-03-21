@@ -4,6 +4,7 @@ def _get_env(name, default):
     return os.environ.get(name, default)
 
 KALSHI_API_KEY = _get_env("KALSHI_API_KEY", "your_kalshi_api_key")
+KALSHI_PRIVATE_KEY_PATH = _get_env("KALSHI_PRIVATE_KEY_PATH", "./kalshi_private_key.pem")
 KALSHI_API_BASE_URL = _get_env("KALSHI_API_BASE_URL", "https://api.elections.kalshi.com/trade-api/v2")
 TELEGRAM_BOT_TOKEN = _get_env("TELEGRAM_BOT_TOKEN", "your_telegram_bot_token")
 TELEGRAM_CHAT_ID = _get_env("TELEGRAM_CHAT_ID", "your_chat_id")

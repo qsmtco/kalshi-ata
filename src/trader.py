@@ -22,6 +22,9 @@ from avellaneda_stoikov import KalshiMarketMaker
 from orderbook_analyzer import OrderBookAnalyzer
 from almgren_chriss import AlmgrenChrissExecutor
 from order_tracker import OrderTracker
+from position_tracker import PositionTracker
+from exit_rules import evaluate_all
+from market_selector import is_tradeable
 
 class Trader:
     def __init__(self, api, notifier, logger, bankroll):
@@ -34,6 +37,8 @@ class Trader:
         self.arbitrage_analyzer = StatisticalArbitrageAnalyzer()
         self.volatility_analyzer = VolatilityAnalyzer()
         self.risk_manager = RiskManager(bankroll)
+        # Phase 1: Local position tracking — synced from API on startup
+        self.position_tracker = PositionTracker()
 
         # Phase 3: Enhanced market data and performance tracking
         self.market_data_streamer = MarketDataStreamer(api, update_interval=60)  # Update every minute
@@ -501,6 +506,115 @@ class Trader:
     # =========================================================================
     # END KYLE LAMBDA
     # =========================================================================
+    # PHASE 4: Telegram Alerts
+    # =========================================================================
+
+    def _send_telegram(self, message: str) -> None:
+        """Send a message via Telegram notifier."""
+        try:
+            self.notifier.send_message(message)
+        except Exception as e:
+            self.logger.warning(f"Telegram send failed: {e}")
+
+    def _send_exit_alert(self, exit_event: dict) -> None:
+        """Send Telegram alert for a position exit."""
+        pnl = exit_event.get('pnl_estimate', 0)
+        pnl_str = f"+${pnl:.2f}" if pnl >= 0 else f"-${abs(pnl):.2f}"
+        emoji = "✅" if pnl >= 0 else "❌"
+        ticker_short = exit_event.get('ticker', 'unknown')[-25:]
+        msg = (
+            f"{emoji} *K-ATA EXIT*\n"
+            f"`{ticker_short}`\n"
+            f"Type: *{exit_event.get('exit_type', '?').upper()}*\n"
+            f"Qty: {exit_event.get('exit_qty', 0)} @ ${exit_event.get('exit_price', 0):.4f}\n"
+            f"Entry: ${exit_event.get('entry_price', 0):.4f}\n"
+            f"P&L: {pnl_str}\n"
+            f"_Reason: {exit_event.get('reason', '?')}_"
+        )
+        self._send_telegram(msg)
+
+    def _send_new_trade_alert(self, trade: dict) -> None:
+        """Send Telegram alert for a new trade."""
+        ticker_short = trade.get('event_id', 'unknown')[-25:]
+        msg = (
+            f"🟢 *K-ATA NEW TRADE*\n"
+            f"`{ticker_short}`\n"
+            f"Action: *{trade.get('action', '?').upper()}* {trade.get('quantity', 0)} @ ${trade.get('price', 0):.4f}\n"
+            f"Strategy: {trade.get('strategy', '?')}\n"
+            f"Sentiment: {trade.get('sentiment_score', 'N/A')}"
+        )
+        self._send_telegram(msg)
+
+    # =========================================================================
+    # PHASE 4: Daily Summary
+    # =========================================================================
+
+    def _send_position_summary_alert(self) -> None:
+        """Send Telegram summary of all open positions."""
+        positions = self.position_tracker.get_all_positions()
+        if not positions:
+            return
+        lines = ["📊 *K-ATA POSITIONS*"]
+        total_pnl = 0.0
+        for pos in positions:
+            pnl = pos.unrealized_pnl
+            total_pnl += pnl
+            pnl_str = f"{'+' if pnl >= 0 else ''}{pnl:.2f}"
+            lines.append(
+                f"• {pos.ticker[-20:]}: {pos.count} @ ${pos.avg_fill_price:.2f} "
+                f"→ ${pos.current_price:.2f} {pnl_str}"
+            )
+        total_str = f"{'+' if total_pnl >= 0 else ''}${total_pnl:.2f}"
+        lines.append(f"*Total P&L: {total_str}*")
+        self._send_telegram("\n".join(lines))
+
+    def maybe_send_daily_summary(self) -> None:
+        """
+        Gate daily summary to send at ~9 AM UTC each day.
+        Call once per trading cycle; method self-gates by timestamp.
+        """
+        from datetime import datetime, timezone
+        now = datetime.now(timezone.utc)
+        if not hasattr(self, '_last_daily_summary_ts'):
+            self._last_daily_summary_ts = None
+
+        # Send at 9 AM UTC, within 10-minute window, once per day
+        if now.hour == 9 and now.minute < 10:
+            if self._last_daily_summary_ts is None or \
+               (now - self._last_daily_summary_ts).total_seconds() > 86400:
+                self._send_position_summary_alert()
+                self._last_daily_summary_ts = now
+                self.logger.info("Daily position summary sent to Telegram")
+
+    # =========================================================================
+    # PHASE 4: Position Logging
+    # =========================================================================
+
+    def log_position_status(self) -> None:
+        """
+        Log compact status line for all open positions each cycle.
+        Shows: ticker, qty, entry, current, P&L, age, TP/SL prices.
+        """
+        positions = self.position_tracker.get_all_positions()
+        if not positions:
+            return
+
+        for pos in positions:
+            pnl = pos.unrealized_pnl
+            pnl_pct = pos.unrealized_pnl_pct
+            pnl_str = f"{'+' if pnl >= 0 else ''}{pnl:.2f}({pnl_pct:+.1f}%)"
+            age_str = f"{pos.age_hours:.0f}h"
+            tp_str = f"${pos.take_profit_price:.3f}"
+            sl_str = f"${pos.stop_loss_price:.3f}"
+            self.logger.info(
+                f"POS | {pos.ticker[-25:]:<25} | "
+                f"qty:{pos.count:<4} | "
+                f"entry:${pos.avg_fill_price:.3f} | "
+                f"curr:${pos.current_price:.3f} | "
+                f"pnl:{pnl_str:<12} | "
+                f"age:{age_str} | "
+                f"TP:{tp_str} SL:{sl_str}"
+            )
 
     # =========================================================================
     # ANALYZER WRAPPERS (missing methods)
@@ -742,6 +856,17 @@ class Trader:
             markets_list = list(market_data.values()) if market_data else []
             formatted_data = {'markets': markets_list}
             
+            # Phase 1: Update current prices for all open positions each cycle
+            for ticker in self.position_tracker.get_open_tickers():
+                market_md = market_data.get(ticker)
+                if market_md:
+                    self.position_tracker.update_price(ticker, market_md.current_price)
+
+            # Phase 2.4: Check exits FIRST — close positions before opening new ones
+            exit_events = self.check_and_execute_exits()
+            if exit_events:
+                self.logger.info(f"Exit events this cycle: {len(exit_events)}")
+
             # Analyze and make trade decision
             trade_decision = self.analyze_market(formatted_data)
             
@@ -774,6 +899,12 @@ class Trader:
 
             # Option C: VPIN background refresh (every 15 min)
             self._refresh_vpin_signals(market_data)
+
+            # Phase 4: Log compact position status each cycle
+            self.log_position_status()
+
+            # Phase 4: Send daily summary at 9 AM UTC (self-gating)
+            self.maybe_send_daily_summary()
 
         except Exception as e:
             self.logger.error(f"Error in trading strategy: {e}")
@@ -870,6 +1001,8 @@ class Trader:
                     self.logger.info(f"News sentiment signal: {sentiment_decision['reason']}")
 
                     # Find suitable market to trade based on sentiment
+                    markets_in_data = market_data.get('markets', []) if isinstance(market_data, dict) else []
+                    self.logger.info(f"News sentiment: checking {len(markets_in_data)} markets for trading")
                     if market_data and 'markets' in market_data and market_data['markets']:
                         market = market_data['markets'][0]  # Simple selection - could be enhanced
                         # MarketData dataclass: use attribute access not .get()
@@ -901,8 +1034,22 @@ class Trader:
                                 'confidence': sentiment_decision['confidence']
                             }
 
+                            # Phase 3: Market selection gate — reject if market not tradeable
+                            tradeable, reason = is_tradeable(
+                                market,
+                                market_data_streamer=self.market_data_streamer,
+                                signal_score=sentiment_decision.get('sentiment_score', 0.0),
+                                min_quality=30.0,
+                            )
+                            if not tradeable:
+                                self.logger.info(
+                                    f"News sentiment: SKIP {event_id[:30]} — market selection: {reason}"
+                                )
+                                return None  # Market not suitable — skip all strategies
                             self.logger.info(f"News sentiment trade decision: {action} {event_id} "
                                            f"at {current_price} (sentiment: {sentiment_decision['sentiment_score']:.3f})")
+                        else:
+                            self.logger.warning(f"News sentiment: no suitable market found — event_id={event_id}, current_price={current_price}, markets_count={len(market_data.get('markets', []))}")
 
             except Exception as e:
                 self.logger.error(f"Error in news sentiment analysis: {e}")
@@ -953,8 +1100,19 @@ class Trader:
                             'arbitrage_pair': [market1['id'], market2['id']]
                         }
 
-                        self.logger.info(f"Arbitrage trade decision: {action} {event_id} "
-                                       f"(z-score: {best_opportunity['z_score']:.3f})")
+                        # Phase 3: Market selection gate
+                        tradeable, reason = is_tradeable(
+                            market1,
+                            market_data_streamer=self.market_data_streamer,
+                            signal_score=execution_decision.get('confidence', 0.0) * 0.2,
+                            min_quality=30.0,
+                        )
+                        if not tradeable:
+                            self.logger.info(f"Arbitrage: SKIP {event_id[:30]} — market selection: {reason}")
+                            trade_decision = None
+                        else:
+                            self.logger.info(f"Arbitrage trade decision: {action} {event_id} "
+                                           f"(z-score: {best_opportunity['z_score']:.3f})")
 
             except Exception as e:
                 self.logger.error(f"Error in statistical arbitrage: {e}")
@@ -996,8 +1154,19 @@ class Trader:
                                 'signal_type': volatility_decision.get('signal_type')
                             }
 
-                            self.logger.info(f"Volatility trade decision: {action} {event_id} "
-                                           f"(regime: {volatility_decision.get('volatility_regime')})")
+                            # Phase 3: Market selection gate
+                            tradeable, reason = is_tradeable(
+                                market,
+                                market_data_streamer=self.market_data_streamer,
+                                signal_score=volatility_decision.get('confidence', 0.0) * 0.2,
+                                min_quality=30.0,
+                            )
+                            if not tradeable:
+                                self.logger.info(f"Volatility: SKIP {event_id[:30]} — market selection: {reason}")
+                                trade_decision = None
+                            else:
+                                self.logger.info(f"Volatility trade decision: {action} {event_id} "
+                                               f"(regime: {volatility_decision.get('volatility_regime')})")
 
             except Exception as e:
                 self.logger.error(f"Error in volatility analysis: {e}")
@@ -1106,20 +1275,29 @@ class Trader:
                 # Convert price to cents (API expects integer cents, e.g., 0.55 -> 55)
                 price_cents = int(price * 100) if price <= 1 else int(price)
                 
-                # Determine side: 'buy' action = 'yes' side, 'sell' action = 'no' side
-                # In Kalshi, 'yes' means betting YES will happen, 'no' means betting it won't
-                side = 'yes' if action.lower() == 'buy' else 'no'
+                # Determine side and action for Kalshi API
+                # side: "yes" or "no" (which contract type to trade)
+                # action: "buy" or "sell"
+                # For simplicity, we always trade "yes" side contracts
+                side = 'yes'
+                kalshi_action = action.lower()  # 'buy' or 'sell'
+                
+                # Hard cap on position size: Kalshi API max is ~200 contracts per order
+                MAX_CONTRACTS_PER_ORDER = 200
+                # Also cap by available bankroll (use conservative $25 if balance unknown)
+                max_by_balance = max(1, int(25 / price)) if price > 0 else 1
+                quantity = min(quantity, MAX_CONTRACTS_PER_ORDER, max_by_balance)
+                quantity = max(1, quantity)  # At least 1
                 
                 # Build order payload per Kalshi API spec
                 # Docs: https://docs.kalshi.com/api-reference/orders/create-order
                 order_payload = {
                     'ticker': event_id,
                     'side': side,
-                    'action': action.lower(),
+                    'action': kalshi_action,
                     'client_order_id': trade_id,
                     'count': quantity,
                     'yes_price': price_cents,  # Price in cents
-                    'no_price': price_cents,
                 }
                 
                 try:
@@ -1154,6 +1332,17 @@ class Trader:
                 ),
                 'trade_id': trade_id
             }
+
+            # Phase 1: Record in position tracker for exit management
+            self.position_tracker.add_position(
+                ticker=event_id,
+                event_id=event_id,
+                strategy=strategy,
+                side='yes',
+                count=quantity,
+                avg_fill_price=price,
+                signal_score=float(trade_decision.get('confidence', 0.5)),
+            )
 
             # Send notification
             self.notifier.send_trade_notification(
@@ -1230,5 +1419,128 @@ class Trader:
         Get portfolio status with basic risk metrics.
         """
         return self.risk_manager.get_portfolio_status()
+
+    # =========================================================================
+    # PHASE 2: EXIT LOGIC — Real sell execution
+    # =========================================================================
+
+    def _execute_sell(self, ticker: str, count: int, price: float,
+                       exit_reason: str, strategy: str) -> dict:
+        """
+        Place a sell order to close a position.
+        Tries FAK first (Fill-And-Kill), falls back to GTC limit order.
+        On success: closes position locally via close_position_simple().
+        """
+        trade_id = f"exit_{strategy}_{ticker[:20]}_{int(time.time())}"
+        price_cents = int(price * 100) if price <= 1 else int(price)
+        count = min(count, 200)  # API hard cap
+
+        # Build the sell order payload — same structure as buy
+        order_payload = {
+            'ticker': ticker,
+            'side': 'yes',
+            'action': 'sell',
+            'client_order_id': trade_id,
+            'count': count,
+            'yes_price': price_cents,
+        }
+
+        # Try FAK first (fill immediately or cancel — good for exiting at market)
+        fak_payload = {**order_payload, 'time_in_force': 'fill_or_kill'}
+        try:
+            api_response = self.api.create_order(fak_payload)
+            order = api_response.get('order', {})
+            status = order.get('status', 'unknown')
+            self.logger.info(
+                f"SELL EXIT: {count} {ticker[:30]} @ ${price:.4f} "
+                f"reason={exit_reason} status={status} method=FAK"
+            )
+            # Local bookkeeping
+            self.close_position_simple(ticker, price, f"exit: {exit_reason}")
+            return {'success': True, 'order': order, 'method': 'FAK', 'trade_id': trade_id}
+        except Exception as e:
+            self.logger.warning(f"Sell FAK failed for {ticker}: {e}")
+
+        # Fallback: GTC limit order (rests on book until filled or cancelled)
+        gtc_payload = {**order_payload, 'time_in_force': 'good_till_canceled',
+                       'client_order_id': f"limit_{trade_id}"}
+        try:
+            api_response = self.api.create_order(gtc_payload)
+            order = api_response.get('order', {})
+            status = order.get('status', 'unknown')
+            self.logger.info(
+                f"SELL LIMIT PLACED: {count} {ticker[:30]} @ ${price:.4f} "
+                f"reason={exit_reason} status={status} method=limit — resting on book"
+            )
+            return {'success': True, 'order': order, 'method': 'limit', 'trade_id': trade_id}
+        except Exception as e:
+            self.logger.error(f"Sell limit also failed for {ticker}: {e}")
+            return {'success': False, 'error': str(e), 'trade_id': trade_id}
+
+    # =========================================================================
+    # PHASE 2.3: Exit evaluation + sell execution
+    # =========================================================================
+
+    def check_and_execute_exits(self) -> list[dict]:
+        """
+        Check all open positions against exit rules.
+        Execute real sell orders for any triggered position.
+        Returns list of exit events for logging/reporting.
+        """
+        exits = []
+
+        for pos in self.position_tracker.get_all_positions():
+            # Get current price from market data streamer
+            market_md = self.market_data_streamer.get_market_data(pos.ticker)
+            if not market_md:
+                self.logger.debug(f"Exit check: no market data for {pos.ticker}")
+                continue
+
+            # Use MarketData.current_price (set each cycle by price update loop)
+            current_price = getattr(market_md, 'current_price', 0.0)
+            if not current_price or current_price == 0:
+                self.logger.debug(f"Exit check: zero price for {pos.ticker}")
+                continue
+
+            # Evaluate all exit rules (hours_remaining=999 since MarketData has no close_date yet)
+            result = evaluate_all(pos, current_price, hours_remaining=999.0)
+
+            if not result.should_exit:
+                continue
+
+            # EXIT TRIGGERED — log it
+            self.logger.info(
+                f"EXIT TRIGGERED [{result.exit_type.upper()}][{result.urgency.upper()}]: "
+                f"{pos.ticker[:30]} — {result.reason}"
+            )
+
+            # Execute the sell
+            exit_result = self._execute_sell(
+                ticker=pos.ticker,
+                count=pos.count,
+                price=current_price,
+                exit_reason=result.reason,
+                strategy=pos.strategy,
+            )
+
+            if exit_result['success']:
+                self.position_tracker.close_position(pos.ticker, reason=f"{result.exit_type}: {result.reason}")
+                exits.append({
+                    'ticker': pos.ticker,
+                    'exit_type': result.exit_type,
+                    'reason': result.reason,
+                    'exit_price': current_price,
+                    'exit_qty': pos.count,
+                    'entry_price': pos.avg_fill_price,
+                    'pnl_estimate': (current_price - pos.avg_fill_price) * pos.count,
+                    'method': exit_result.get('method', 'unknown'),
+                })
+                # Phase 4: Send Telegram alert for this exit
+                self._send_exit_alert(exits[-1])
+                self.logger.info(f"Exit SUCCESS: {pos.ticker[:20]} {exit_result.get('method')} @ ${current_price:.4f}")
+            else:
+                self.logger.error(f"Exit FAILED for {pos.ticker}: {exit_result.get('error')}")
+
+        return exits
 
 
