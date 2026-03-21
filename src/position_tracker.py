@@ -206,7 +206,8 @@ class PositionTracker:
             # Count: try position_fp (market_positions) or total_cost_shares_fp (event_positions)
             count_raw = p.get('position_fp') or p.get('total_cost_shares_fp') or p.get('count', 0)
             try:
-                count = int(float(count_raw)) if isinstance(count_raw, (str, float)) else 0
+                # Accept int, str, or float for count_raw (Kalshi returns fixed-point ints)
+                count = int(float(count_raw)) if isinstance(count_raw, (int, str, float)) else 0
             except (ValueError, TypeError):
                 count = 0
             if count <= 0:

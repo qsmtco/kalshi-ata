@@ -1502,8 +1502,17 @@ class Trader:
                 self.logger.debug(f"Exit check: zero price for {pos.ticker}")
                 continue
 
-            # Evaluate all exit rules (hours_remaining=999 since MarketData has no close_date yet)
-            result = evaluate_all(pos, current_price, hours_remaining=999.0)
+            # Evaluate all exit rules (use close_date from market data for time remaining)
+            close_date = getattr(market_md, 'close_date', None)
+            hours_remaining = 999.0
+            if close_date:
+                try:
+                    from datetime import datetime, timezone
+                    close_dt = datetime.fromisoformat(close_date.replace('Z', '+00:00'))
+                    hours_remaining = (close_dt - datetime.now(timezone.utc)).total_seconds() / 3600
+                except (ValueError, TypeError):
+                    pass  # leave at 999.0
+            result = evaluate_all(pos, current_price, hours_remaining=hours_remaining)
 
             if not result.should_exit:
                 continue
