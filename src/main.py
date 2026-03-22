@@ -36,12 +36,11 @@ def main():
         logger.info("Market data streaming started")
 
         # Phase 1: Sync open positions from API into PositionTracker
-        # NOTE: Python api.get_positions() returns raw Kalshi response with market_positions at TOP level
         try:
             api_resp = api.get_positions()
             if api_resp and isinstance(api_resp, dict):
-                # Raw Kalshi API has market_positions at top level (not nested under 'raw')
-                positions_list = api_resp.get('market_positions', api_resp.get('positions', []))
+                # Kalshi returns {"market_positions": [...]} at TOP level
+                positions_list = api_resp.get('market_positions', api_resp.get('event_positions', []))
                 if isinstance(positions_list, dict):
                     positions_list = list(positions_list.values())
                 count = trader.position_tracker.sync_from_api(positions_list)

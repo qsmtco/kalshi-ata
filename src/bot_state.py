@@ -65,7 +65,7 @@ def fetch_balance(api: KalshiAPI) -> Dict[str, Any]:
 
 def fetch_positions(api: KalshiAPI) -> Dict[str, Any]:
     response = api.get_positions() or {}
-    positions = response.get("positions") or response.get("data") or []
+    positions = response.get("market_positions") or response.get("event_positions") or []
     return {
         "positions": positions,
         "count": len(positions),
