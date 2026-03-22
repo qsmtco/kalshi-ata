@@ -135,7 +135,7 @@ class KalshiAPI:
 
         while attempt < self.max_retries:
             try:
-                response = requests.request(method, url, headers=headers, **kwargs)
+                response = requests.request(method, url, headers=headers, timeout=30, **kwargs)
                 response.raise_for_status()
                 if response.content:
                     return response.json()

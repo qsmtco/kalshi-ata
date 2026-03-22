@@ -16,11 +16,17 @@ class ExitResult:
     urgency: str = 'normal'  # 'high' | 'normal' | 'low'
 
 
-def check_take_profit(position, current_price: float, threshold: float = 1.50) -> ExitResult:
+def check_take_profit(position, current_price: float, threshold: float = None) -> ExitResult:
     """
     Exit if price has risen enough to lock in profit.
-    threshold=1.50 means exit if current >= entry * 1.50 (+50%).
+    threshold: multiplier on entry price. None = use position.take_profit_pct (+50% default).
+    threshold=1.50 means exit if current >= entry * 1.50 (+50% profit).
     """
+    if threshold is None:
+        # Per-position setting: take_profit_pct stored as 0.50 (= +50% above entry)
+        # Convert to threshold: entry * (1 + take_profit_pct) = entry * 1.50
+        take_profit_pct = getattr(position, 'take_profit_pct', 0.50)
+        threshold = 1.0 + take_profit_pct
     if current_price >= position.avg_fill_price * threshold:
         pnl_pct = (current_price - position.avg_fill_price) / position.avg_fill_price * 100
         return ExitResult(

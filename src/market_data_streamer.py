@@ -265,19 +265,26 @@ class MarketDataStreamer:
                 if not ticker:
                     continue
 
-                # Compute mid price from bid-ask (Kalshi uses yes_bid_dollars / yes_ask_dollars)
+                # Compute mid price from bid-ask, fall back to last_price
+                # Same logic as get_current_price() — ensures we don't skip last_price-only markets
                 bid_r = mkt.get('yes_bid_dollars') or mkt.get('yes_bid')
                 ask_r = mkt.get('yes_ask_dollars') or mkt.get('yes_ask')
+                last_r = mkt.get('last_price_dollars') or mkt.get('last_price')
                 price = None
                 if bid_r:
                     try:
                         bid_f = float(bid_r) if isinstance(bid_r, str) else bid_r
-                        if ask_r:
-                            ask_f = float(ask_r) if isinstance(ask_r, str) else ask_r
-                            if ask_f > 0:
-                                price = (bid_f + ask_f) / 2.0
-                        if price is None:
+                        ask_f = float(ask_r) if isinstance(ask_r, str) and ask_r else None
+                        if ask_f and ask_f > 0:
+                            price = (bid_f + ask_f) / 2.0
+                        else:
                             price = bid_f
+                    except (ValueError, TypeError):
+                        pass
+                elif last_r:
+                    # No bid — fall back to last_price so we don't skip last_price-only markets
+                    try:
+                        price = float(last_r) if isinstance(last_r, str) else last_r
                     except (ValueError, TypeError):
                         pass
 
