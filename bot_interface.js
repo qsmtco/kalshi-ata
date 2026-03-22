@@ -28,7 +28,7 @@ class BotInterface {
         this.app.use((req, res, next) => {
             res.header('Access-Control-Allow-Origin', '*');
             res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
-            res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept, Authorization');
+            res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept, Authorization, X-API-Key');
             
             if (req.method === 'OPTIONS') {
                 res.sendStatus(200);
@@ -37,7 +37,7 @@ class BotInterface {
             }
         });
 
-        // Health check endpoint
+        // Health check endpoints (exempt from auth — must be before auth middleware)
         this.app.get('/health', (req, res) => {
             res.json({
                 status: 'healthy',
@@ -45,6 +45,23 @@ class BotInterface {
                 pythonBot: this.pythonProcess ? 'running' : 'stopped'
             });
         });
+        this.app.get('/api/health', (req, res) => {
+            res.json({ status: 'healthy' });
+        });
+
+        // API Key authentication middleware (protects all /api/* routes below)
+        const BOT_API_SECRET = process.env.BOT_API_SECRET;
+        if (BOT_API_SECRET) {
+            this.app.use('/api', (req, res, next) => {
+                const providedKey = req.headers['x-api-key'];
+                if (providedKey !== BOT_API_SECRET) {
+                    return res.status(401).json({ error: 'Unauthorized — valid X-API-Key header required' });
+                }
+                next();
+            });
+        } else {
+            console.warn('[AUTH] BOT_API_SECRET not set in .env — API endpoints are unprotected. Set a strong secret to lock them down.');
+        }
 
         // Bot status endpoint
         this.app.get('/api/status', async (req, res) => {
