@@ -1216,7 +1216,15 @@ class Trader:
             self.logger.info("No trade decision to execute.")
             return
 
+        # Step 2.4: Liquidity pre-check — reject signals in illiquid markets before any order
         event_id = trade_decision['event_id']
+        market_md = self.market_data_streamer.get_market_data(event_id)
+        if market_md:
+            is_liquid, reason = self.market_data_streamer.is_market_liquid(market_md)
+            if not is_liquid:
+                self.logger.info(f"SKIPPING {event_id}: market not liquid — {reason}")
+                return  # don't place the order
+
         action = trade_decision['action']
         quantity = trade_decision['quantity']
         price = trade_decision['price']
@@ -1425,11 +1433,16 @@ class Trader:
     # =========================================================================
 
     def _execute_sell(self, ticker: str, count: int, price: float,
-                       exit_reason: str, strategy: str) -> dict:
+                       exit_reason: str, strategy: str,
+                       exit_qty: int = None) -> dict:
         """
-        Place a sell order to close a position.
+        Place a sell order to close or reduce a position.
         Tries FAK first (Fill-And-Kill), falls back to GTC limit order.
-        On success: closes position locally via close_position_simple().
+
+        Args:
+            exit_qty: If provided and less than count, sells only exit_qty contracts
+                      and calls reduce_position() (partial exit). Otherwise fully closes
+                      the position via close_position_simple() (full exit).
         """
         trade_id = f"exit_{strategy}_{ticker[:20]}_{int(time.time())}"
         price_cents = int(price * 100) if price <= 1 else int(price)
@@ -1455,8 +1468,13 @@ class Trader:
                 f"SELL EXIT: {count} {ticker[:30]} @ ${price:.4f} "
                 f"reason={exit_reason} status={status} method=FAK"
             )
-            # Local bookkeeping
-            self.close_position_simple(ticker, price, f"exit: {exit_reason}")
+            # Step 3.3: Local bookkeeping — partial vs full exit
+            if exit_qty is not None and exit_qty < count:
+                self.position_tracker.reduce_position(ticker, exit_qty, reason=exit_reason)
+                self.logger.info(f"PARTIAL EXIT SUCCESS: {ticker[:20]} "
+                                 f"{exit_qty} contracts @ ${price:.4f}")
+            else:
+                self.close_position_simple(ticker, price, f"exit: {exit_reason}")
             return {'success': True, 'order': order, 'method': 'FAK', 'trade_id': trade_id}
         except Exception as e:
             self.logger.warning(f"Sell FAK failed for {ticker}: {e}")
@@ -1472,6 +1490,13 @@ class Trader:
                 f"SELL LIMIT PLACED: {count} {ticker[:30]} @ ${price:.4f} "
                 f"reason={exit_reason} status={status} method=limit — resting on book"
             )
+            # Step 3.3: Same partial/full exit bookkeeping for GTC fallback
+            if exit_qty is not None and exit_qty < count:
+                self.position_tracker.reduce_position(ticker, exit_qty, reason=exit_reason)
+                self.logger.info(f"PARTIAL EXIT SUCCESS (limit): {ticker[:20]} "
+                                 f"{exit_qty} contracts @ ${price:.4f}")
+            else:
+                self.close_position_simple(ticker, price, f"exit: {exit_reason}")
             return {'success': True, 'order': order, 'method': 'limit', 'trade_id': trade_id}
         except Exception as e:
             self.logger.error(f"Sell limit also failed for {ticker}: {e}")
@@ -1524,29 +1549,49 @@ class Trader:
             )
 
             # Execute the sell
+            # Pass exit_qty from result (for partial exits, else None = full exit)
             exit_result = self._execute_sell(
                 ticker=pos.ticker,
                 count=pos.count,
                 price=current_price,
                 exit_reason=result.reason,
                 strategy=pos.strategy,
+                exit_qty=getattr(result, 'exit_qty', None),
             )
 
             if exit_result['success']:
-                self.position_tracker.close_position(pos.ticker, reason=f"{result.exit_type}: {result.reason}")
-                exits.append({
-                    'ticker': pos.ticker,
-                    'exit_type': result.exit_type,
-                    'reason': result.reason,
-                    'exit_price': current_price,
-                    'exit_qty': pos.count,
-                    'entry_price': pos.avg_fill_price,
-                    'pnl_estimate': (current_price - pos.avg_fill_price) * pos.count,
-                    'method': exit_result.get('method', 'unknown'),
-                })
+                # Step 3.3: For partial exits, _execute_sell calls reduce_position (not close_position)
+                # For full exits, _execute_sell calls close_position_simple — DO NOT call again here
+                if result.exit_type == 'partial_exit':
+                    # reduce_position was already called inside _execute_sell
+                    exit_qty = getattr(result, 'exit_qty', pos.count)
+                    self.logger.info(f"PARTIAL EXIT SUCCESS: {pos.ticker[:20]} "
+                                     f"{exit_qty} contracts @ ${current_price:.4f}")
+                    exits.append({
+                        'ticker': pos.ticker,
+                        'exit_type': result.exit_type,
+                        'reason': result.reason,
+                        'exit_price': current_price,
+                        'exit_qty': exit_qty,
+                        'entry_price': pos.avg_fill_price,
+                        'pnl_estimate': (current_price - pos.avg_fill_price) * exit_qty,
+                        'method': exit_result.get('method', 'unknown'),
+                    })
+                else:
+                    # Full exit: _execute_sell already called close_position_simple
+                    exits.append({
+                        'ticker': pos.ticker,
+                        'exit_type': result.exit_type,
+                        'reason': result.reason,
+                        'exit_price': current_price,
+                        'exit_qty': pos.count,
+                        'entry_price': pos.avg_fill_price,
+                        'pnl_estimate': (current_price - pos.avg_fill_price) * pos.count,
+                        'method': exit_result.get('method', 'unknown'),
+                    })
+                    self.logger.info(f"Exit SUCCESS: {pos.ticker[:20]} {exit_result.get('method')} @ ${current_price:.4f}")
                 # Phase 4: Send Telegram alert for this exit
                 self._send_exit_alert(exits[-1])
-                self.logger.info(f"Exit SUCCESS: {pos.ticker[:20]} {exit_result.get('method')} @ ${current_price:.4f}")
             else:
                 self.logger.error(f"Exit FAILED for {pos.ticker}: {exit_result.get('error')}")
 

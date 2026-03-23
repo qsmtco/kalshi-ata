@@ -37,7 +37,7 @@ class BotInterface {
             }
         });
 
-        // Health check endpoints (exempt from auth — must be before auth middleware)
+        // Health check endpoints (exempt from auth -- must be before auth middleware)
         this.app.get('/health', (req, res) => {
             res.json({
                 status: 'healthy',
@@ -55,12 +55,12 @@ class BotInterface {
             this.app.use('/api', (req, res, next) => {
                 const providedKey = req.headers['x-api-key'];
                 if (providedKey !== BOT_API_SECRET) {
-                    return res.status(401).json({ error: 'Unauthorized — valid X-API-Key header required' });
+                    return res.status(401).json({ error: 'Unauthorized -- valid X-API-Key header required' });
                 }
                 next();
             });
         } else {
-            console.warn('[AUTH] BOT_API_SECRET not set in .env — API endpoints are unprotected. Set a strong secret to lock them down.');
+            console.warn('[AUTH] BOT_API_SECRET not set in .env -- API endpoints are unprotected. Set a strong secret to lock them down.');
         }
 
         // Bot status endpoint

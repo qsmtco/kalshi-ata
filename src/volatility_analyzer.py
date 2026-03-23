@@ -73,6 +73,38 @@ class VolatilityAnalyzer:
                 'error': str(e)
             }
 
+    def calculate_atr(self, prices: List[float], period: int = 14) -> float:
+        """
+        Calculate Average True Range for a price series.
+        For binary markets (0-1 price range), True Range is approximated
+        as |price_change| with a minimum tick of $0.01.
+
+        Args:
+            prices: Price series (list of float dollar prices)
+            period: EMA lookback period for ATR (default 14)
+
+        Returns:
+            ATR value in dollar terms, or 0.0 if insufficient data
+        """
+        if len(prices) < 2:
+            return 0.0
+
+        prices_arr = np.array(prices, dtype=float)
+        # True Range: |price_change| with $0.01 floor (binary market minimum tick)
+        changes = np.abs(np.diff(prices_arr))
+        changes = np.maximum(changes, 0.01)
+
+        if len(changes) < period:
+            # Not enough data for EMA — use simple mean
+            return float(np.mean(changes))
+
+        # EMA-style ATR (same formula as Wilder's original)
+        atr = changes[0]
+        alpha = 1.0 / period
+        for change in changes[1:]:
+            atr = (alpha * change) + ((1 - alpha) * atr)
+        return float(atr)
+
     def fit_garch_model(self, returns: List[float]) -> Dict[str, Any]:
         """
         Fit GARCH(1,1) model to returns data.

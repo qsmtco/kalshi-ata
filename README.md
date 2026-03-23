@@ -51,35 +51,97 @@ K-ATA (Kalshi Adaptive Trading Agent) is a self-optimizing quantitative trading 
 
 ---
 
-## The Exit Intelligence Layer — Five Triggers, Zero Ambiguity
+## The Exit Intelligence Layer — Five Advanced Strategies
 
-> *Most bots know when to enter. K-ATA knows when to leave.*
+> *Most bots know when to enter. K-ATA knows when to leave — and how much to leave.*
 
 ---
 
-The original K-ATA had a problem: it could open positions but had no disciplined way to close them. A position in a losing trade would sit there indefinitely, bleeding value. A winning position had no take-profit target. Nobody was watching the clock.
+K-ATA runs five independent exit strategies every cycle, in strict priority order. Each strategy is a complete, self-contained exit system. The first to fire wins. No double-exits, no conflicts.
 
-This update adds a complete **exit intelligence system** — five independent exit triggers that run every cycle, in priority order, against every open position.
+### Exit Priority Order
 
-### The Five Exit Triggers
+| # | Strategy | Trigger Condition | Type |
+|---|----------|-------------------|------|
+| 1 | **Order Book Liquidity Exit** | `yes_bid = $0` or `bid_qty < 10` | Mandatory |
+| 2 | **Stop Loss** | Price ≤ entry × 60% (-40%) | Mandatory |
+| 3 | **Market Close** | < 30 min until settlement | Mandatory |
+| 4 | **Take Profit (Barrier-Based)** | Price ≥ entry × `barrier_tp_multiplier` | Optimization |
+| 5 | **ATR Trailing Stop** | Price ≤ (peak - N×ATR) | Trailing |
+| 6 | **Partial Exit Tiers** | Price hits tier threshold (1.2×, 1.4×, 1.6×) | Scaling |
+| 7 | **Probability Shift** | Market moved ≥-25% against signal | Guard |
+| 8 | **Time Exit** | Position > 24h with no profit | Last Resort |
 
-| Trigger | Condition | Priority | Urgency |
-|---------|-----------|----------|---------|
-| **Stop Loss** | Price drops to 60% of entry (-40%) | 1st | High |
-| **Market Close** | Less than 30 minutes until settlement | 1st | High |
-| **Take Profit** | Price rises to 150% of entry (+50%) | 2nd | High |
-| **Probability Shift** | Market moved -25% against your signal thesis | 3rd | High |
-| **Time Exit** | Position open > 24 hours with no profit | 4th | Normal |
+---
 
-The first trigger that fires wins. Stop loss and market close take priority — they're non-negotiable. Take profit and time exit are optimization. Probability shift is the prediction-market-specific guard: if the market's implied probability moves against your thesis, the market is telling you something.
+#### Strategy 1: Order Book Liquidity Exit
+*Priority: Highest — fires before everything else*
 
-### Why 40% Stop Loss on a 4-Cent Contract?
+K-ATA will not hold a position in a market that has gone dark. If `yes_bid = $0.00` (no buyers) or the top bid has fewer than 10 contracts, K-ATA exits immediately at the best available price. This prevents **zombie positions** — entries in illiquid markets that can never be exited.
 
-This was a design question. A $0.04 contract doesn't behave like a stock. The market is pricing 4% implied probability. If it drops to $0.024, that's 3% implied probability — the bet is getting *less* likely, and you're wrong. Getting out at -40% is correct risk management, not overtrading.
+**Pre-entry gate:** New signals are rejected if the market fails liquidity checks (`spread > 15%`, `bid_qty < 10`).
+
+#### Strategy 2: Stop Loss
+*Priority: 2nd — non-negotiable capital protection*
+
+Fixed percentage loss from entry. Default: -40% (`entry × 0.60`). This is a hard stop — K-ATA will not hold through a -40% drawdown waiting for a reversal.
+
+#### Strategy 3: Market Close
+*Priority: 3rd — time is money, especially in markets about to settle*
+
+Exits any position when there are fewer than 30 minutes until market settlement. Binary contracts settle at $0 or $1 — holding through close is speculating on the outcome, not the price.
+
+#### Strategy 4: Triple-Barrier Take Profit (Barrier-Based TP)
+*Priority: 4th — reward ratio set at entry from signal confidence*
+
+The take-profit target is set at entry based on `signal_confidence`:
+- Low confidence (0.0) → `barrier_tp_multiplier = 1.50` (+50%)
+- High confidence (1.0) → `barrier_tp_multiplier = 2.00` (+100%)
+- Linear interpolation between
+
+This is further adjusted each cycle by **volatility** (wider in volatile markets) and **time decay** (tighter near close).
+
+Formula: `TP_mult = 1.0 + base_tp + vol_scalar - time_penalty`
+Capped between 1.0× and 3.0×.
+
+#### Strategy 5: ATR Trailing Stop (Chandelier Exit)
+*Priority: 5th — locks in gains when trend breaks*
+
+A Chandelier-style trailing stop that trails the price:
+- Tracks the **peak price** since entry (`highest_price_since_entry`)
+- Stop level = `peak - (N × ATR)` — rises with profits, never falls
+- Default: N=3, ATR = realized volatility of the contract
+- Exit when current price drops to or below the trailing stop
+
+Unlike a fixed TP, the ATR stop **rides winners** — it locks in more profit as the price rises, but exits cleanly when the trend breaks.
+
+#### Strategy 6: Partial Exit / Scaling Out
+*Priority: 6th — take money off the table in stages*
+
+Instead of all-or-nothing, K-ATA exits a portion at each milestone:
+| Tier | Threshold | % Exited | Cumulative |
+|------|----------|----------|------------|
+| 0 | 1.20× entry | 30% | 30% |
+| 1 | 1.40× entry | 30% | 60% |
+| 2 | 1.60× entry | 20% | 80% |
+
+Each tier fires only once. After 80% is exited, K-ATA holds the remaining 20% with no further partial exits — letting it run toward the full barrier TP.
+
+#### Strategy 7: Probability Shift
+*Priority: 7th — the market is telling you something*
+
+If the market's implied probability moves against your original signal by 25% or more, K-ATA exits. This is the prediction-market-specific guard: the market knows something you don't.
+
+#### Strategy 8: Time Exit
+*Priority: Lowest — last resort*
+
+Position older than 24 hours with no profit is exited. This prevents indefinite holds in sideways markets.
+
+---
 
 ### FAK First, Limit Second
 
-When an exit fires, K-ATA tries to sell with a **Fill-And-Kill (FAK)** order — attempt immediate fill at current price, cancel if nobody's there. If FAK fails, it falls back to a **good-till-canceled limit order** that rests on the book. This is how you exit a thin market without burning your entire position into a single counterparty.
+When any exit fires, K-ATA tries a **Fill-And-Kill (FAK)** order first — attempt immediate fill at current price, cancel if no match. If FAK fails, falls back to a **good-till-canceled limit order** resting on the book.
 
 ---
 

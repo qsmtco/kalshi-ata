@@ -6,8 +6,10 @@ Replaces reliance on repeated API calls for position state.
 """
 import logging
 from dataclasses import dataclass, field
+from typing import List, Dict, Any
 from datetime import datetime, timezone
 from typing import Optional
+from config import PARTIAL_EXIT_TIERS, BARRIER_TP_BASE, BARRIER_TP_CONFIDENCE_SCALING, BARRIER_TP_CONFIDENCE_MAX
 
 logger = logging.getLogger(__name__)
 
@@ -31,6 +33,29 @@ class Position:
     # Default exit thresholds (can be overridden per-position)
     stop_loss_pct: float = 0.40   # exit if price drops 40% from entry
     take_profit_pct: float = 0.50  # exit if price rises 50% from entry
+
+    # --- Step 1.4: Partial exit + advanced exits ---
+    # Partial exit tracking
+    exit_tiers: List[Dict[str, Any]] = field(default_factory=list)  # [{'threshold_mult': 1.20, 'qty_pct': 0.30, 'exited': False}, ...]
+    remaining_count: int = 0         # tracks remaining contracts after partial exits
+    initial_count: int = 0          # original count at entry
+
+    # ATR trailing stop
+    atr_trailing_stop: float = 0.0
+    atr_multiplier: float = 3.0
+    highest_price_since_entry: float = 0.0
+
+    # Triple-barrier
+    barrier_tp_multiplier: float = 1.50
+    signal_confidence: float = 0.5
+
+    # Volatility-time hybrid
+    volatility_adjusted_tp_mult: float = 1.50
+
+    # Barrier tracking
+    barriers_triggered: List[str] = field(default_factory=list)
+    barrier_hit_order: Optional[str] = None
+    barrier_hit_time: Optional[datetime] = None
 
     @property
     def cost_basis(self) -> float:
@@ -116,6 +141,7 @@ class PositionTracker:
     def add_position(self, ticker: str, event_id: str, strategy: str,
                     side: str, count: int, avg_fill_price: float,
                     signal_score: float = 0.0,
+                    signal_confidence: float = 0.5,  # Step 5.1: for barrier_tp_multiplier
                     stop_loss_pct: float = 0.40,
                     take_profit_pct: float = 0.50) -> None:
         """
@@ -146,7 +172,26 @@ class PositionTracker:
                 signal_at_entry=signal_score,
                 stop_loss_pct=stop_loss_pct,
                 take_profit_pct=take_profit_pct,
+                # Step 3.1: Initialize partial exit tiers and counters
+                exit_tiers=[
+                    {'threshold_mult': mult, 'qty_pct': qty_pct, 'exited': False, 'exit_price': None}
+                    for mult, qty_pct in PARTIAL_EXIT_TIERS
+                ],
+                remaining_count=count,
+                initial_count=count,
             )
+            pos = self._positions[ticker]
+            # Step 5.1: Compute barrier_tp_multiplier from signal confidence
+            # Linear interpolation: conf=0.0 → base_tp, conf=1.0 → confidence_max_tp
+            pos.signal_confidence = max(0.0, min(1.0, signal_confidence))  # clamp to 0-1
+            if BARRIER_TP_CONFIDENCE_SCALING:
+                pos.barrier_tp_multiplier = min(
+                    BARRIER_TP_CONFIDENCE_MAX,
+                    BARRIER_TP_BASE + (BARRIER_TP_CONFIDENCE_MAX - BARRIER_TP_BASE) * pos.signal_confidence
+                )
+            else:
+                pos.barrier_tp_multiplier = BARRIER_TP_BASE
+
             logger.info(f"Position opened: {ticker} — {count} @ ${avg_fill_price:.4f}")
 
     def update_price(self, ticker: str, current_price: float) -> None:
@@ -154,6 +199,51 @@ class PositionTracker:
         if ticker in self._positions:
             self._positions[ticker].current_price = current_price
             self._positions[ticker].last_updated = datetime.now(timezone.utc)
+
+    def update_highest_price(self, ticker: str, current_price: float) -> None:
+        """
+        Step 1.4 / 4.3: Update peak price tracked for ATR trailing stop.
+        If current_price exceeds the tracked highest, update it and recompute the
+        trailing stop level using the position's stored volatility.
+        """
+        if ticker not in self._positions:
+            return
+        pos = self._positions[ticker]
+        if current_price > pos.highest_price_since_entry:
+            pos.highest_price_since_entry = current_price
+            # Recompute ATR trailing stop: stop = highest - (N × ATR)
+            if pos.volatility and pos.volatility > 0:
+                pos.atr_trailing_stop = pos.highest_price_since_entry - (pos.atr_multiplier * pos.volatility)
+
+    def update_volatility_adjusted_tp(self, ticker: str, current_volatility: float,
+                                       base_tp_mult: float = 1.50) -> None:
+        """
+        Step 4.3: Update the volatility-adjusted take-profit multiplier.
+        Higher volatility → wider TP (more room to breathe).
+        Formula: TP_mult = min(base_tp + (scalar × vol/price), max_cap)
+        """
+        if ticker not in self._positions:
+            return
+        pos = self._positions[ticker]
+        vol_scalar = 0.3  # from config VOLATILITY_TP_SCALAR
+        vol_tp_cap = 3.0  # from config VOLATILITY_TP_MAX
+        price = pos.avg_fill_price
+        vol_adjusted = base_tp_mult + (vol_scalar * current_volatility / price) if price > 0 else base_tp_mult
+        pos.volatility_adjusted_tp_mult = min(vol_adjusted, vol_tp_cap)
+
+    def record_barrier_hit(self, ticker: str, barrier: str) -> None:
+        """
+        Step 5.2: Record which barrier was hit first (for triple-barrier analytics).
+        Only the first barrier to fire is recorded — subsequent barriers are logged in
+        barriers_triggered but do not overwrite barrier_hit_order.
+        """
+        if ticker not in self._positions:
+            return
+        pos = self._positions[ticker]
+        if pos.barrier_hit_order is None:
+            pos.barrier_hit_order = barrier
+            pos.barrier_hit_time = datetime.now(timezone.utc)
+        pos.barriers_triggered.append(barrier)
 
     def reduce_position(self, ticker: str, count: int, reason: str = "") -> None:
         """Partially close a position."""
@@ -163,10 +253,19 @@ class PositionTracker:
         pos = self._positions[ticker]
         if count >= pos.count:
             self.close_position(ticker, reason=f"full_close: {reason}")
+        elif hasattr(pos, 'remaining_count') and count >= pos.remaining_count:
+            # If reducing by remaining_count or more, close the position
+            self.close_position(ticker, reason=f"full_close: {reason}")
         else:
-            pos.count -= count
+            # Partial exit: reduce remaining_count, but keep count (cost basis) unchanged
+            # count = original position size for P&L
+            # remaining_count = contracts still held (used for partial exit sizing)
+            if hasattr(pos, 'remaining_count') and pos.remaining_count > 0:
+                reduce_by = min(count, pos.remaining_count)
+                pos.remaining_count = max(0, pos.remaining_count - reduce_by)
             pos.last_updated = datetime.now(timezone.utc)
-            logger.info(f"Position reduced: {ticker} — sold {count}, {pos.count} remaining. Reason: {reason}")
+            logger.info(f"Position reduced: {ticker} — sold {count}, "
+                        f"{pos.remaining_count} remaining. Reason: {reason}")
 
     def close_position(self, ticker: str, reason: str = "") -> None:
         """Fully close a position."""

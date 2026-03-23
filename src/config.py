@@ -127,4 +127,39 @@ AC_N_TRADES           = int(os.environ.get('AC_N_TRADES', '10'))    # number of 
 AC_GAMMA             = float(os.environ.get('AC_GAMMA', '0.001'))   # temporary impact coefficient
 AC_RISK_AVERSION     = float(os.environ.get('AC_RISK_AVERSION', '0.1'))  # risk aversion λ
 
+# =========================================================================
+# PHASE 1: ADVANCED EXIT STRATEGY CONFIGURATION
+# =========================================================================
+# Implemented: Liquidity Exit | Partial Exit | ATR Trailing Stop | Triple-Barrier | Volatility-Time Hybrid
+
+# --- Liquidity Exit ---
+LIQUIDITY_MIN_BID_DOLLARS: float = float(os.environ.get('LIQUIDITY_MIN_BID_DOLLARS', '0.05'))
+LIQUIDITY_MIN_BID_QTY: int = int(os.environ.get('LIQUIDITY_MIN_BID_QTY', '10'))
+LIQUIDITY_SPREAD_MAX: float = float(os.environ.get('LIQUIDITY_SPREAD_MAX', '0.15'))
+
+# --- Partial Exit Tiers ---
+# List of (price_multiplier, qty_percentage) tuples — exit this fraction at this price level
+# Example: (1.20, 0.30) means exit 30% of position when price hits entry × 1.20 (+20%)
+PARTIAL_EXIT_TIERS: list = [
+    (1.20, 0.30),   # Exit 30% at entry + 20%
+    (1.40, 0.30),   # Exit 30% at entry + 40%
+    (1.60, 0.20),   # Exit 20% at entry + 60%
+    # Remaining 20% rides to ATR trailing stop or final market close
+]
+
+# --- ATR Trailing Stop ---
+ATR_MULTIPLIER: float = float(os.environ.get('ATR_MULTIPLIER', '3.0'))
+ATR_PERIOD: int = int(os.environ.get('ATR_PERIOD', '14'))
+
+# --- Triple-Barrier ---
+BARRIER_TP_BASE: float = float(os.environ.get('BARRIER_TP_BASE', '1.50'))  # default +50%
+BARRIER_TP_CONFIDENCE_SCALING: bool = os.environ.get('BARRIER_TP_CONFIDENCE_SCALING', 'true').lower() == 'true'
+BARRIER_TP_CONFIDENCE_MAX: float = float(os.environ.get('BARRIER_TP_CONFIDENCE_MAX', '2.00'))  # max +100%
+
+# --- Volatility-Time Hybrid ---
+VOLATILITY_TP_SCALAR: float = float(os.environ.get('VOLATILITY_TP_SCALAR', '0.3'))
+VOLATILITY_TP_MAX: float = float(os.environ.get('VOLATILITY_TP_MAX', '3.00'))
+TIME_DECAY_FULL_HORIZON_HRS: float = float(os.environ.get('TIME_DECAY_FULL_HORIZON_HRS', '24.0'))
+TIME_DECAY_MAX_PENALTY: float = float(os.environ.get('TIME_DECAY_MAX_PENALTY', '0.20'))
+
 

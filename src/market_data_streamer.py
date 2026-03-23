@@ -9,6 +9,11 @@ from typing import Dict, List, Optional, Any, Callable, Union
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 import requests
+from volatility_analyzer import VolatilityAnalyzer
+from config import LIQUIDITY_MIN_BID_DOLLARS, LIQUIDITY_MIN_BID_QTY, LIQUIDITY_SPREAD_MAX
+
+# Module constants
+MAX_PRICE_HISTORY = 200  # Max entries in rolling price history
 
 logger = logging.getLogger(__name__)
 
@@ -26,6 +31,13 @@ class MarketData:
     price_history: Optional[List[float]] = None
     volatility: Optional[float] = None
     close_date: Optional[str] = None  # ISO8601 timestamp from Kalshi API
+
+    # --- Step 1.5: Liquidity fields for order book monitoring ---
+    yes_bid: Optional[float] = None       # Best bid price (dollars)
+    yes_ask: Optional[float] = None       # Best ask price (dollars)
+    yes_bid_qty: Optional[int] = None   # Contracts available at best bid
+    yes_ask_qty: Optional[int] = None   # Contracts available at best ask
+    spread_pct: Optional[float] = None   # (ask - bid) / ask, 0 to 1
 
     def __post_init__(self):
         if self.last_updated is None:
@@ -63,6 +75,7 @@ class MarketDataStreamer:
         self.running = False
         self.thread: Optional[threading.Thread] = None
         self.last_update = datetime.now()
+        self.volatility_analyzer = VolatilityAnalyzer()  # Step 1.3: ATR via VolatilityAnalyzer
 
     # -------------------------------------------------------------------------
     # Phase 1 helpers: price extraction + liquidity check
@@ -270,6 +283,9 @@ class MarketDataStreamer:
                 bid_r = mkt.get('yes_bid_dollars') or mkt.get('yes_bid')
                 ask_r = mkt.get('yes_ask_dollars') or mkt.get('yes_ask')
                 last_r = mkt.get('last_price_dollars') or mkt.get('last_price')
+                # Always parse bid/ask floats so they're available for liquidity fields
+                bid_f = float(bid_r) if bid_r else None
+                ask_f = float(ask_r) if ask_r else None
                 price = None
                 if bid_r:
                     try:
@@ -297,7 +313,7 @@ class MarketDataStreamer:
                     md.current_price = price
                     md.last_updated = datetime.now()
                     md.price_history.append(price)
-                    if len(md.price_history) > 100:
+                    if len(md.price_history) > MAX_PRICE_HISTORY:
                         md.price_history.pop(0)
                 else:
                     md = MarketData(
@@ -311,12 +327,21 @@ class MarketDataStreamer:
                     )
                     self.markets_data[ticker] = md
 
-                # Annualized volatility from rolling returns
-                if len(md.price_history) > 10:
-                    recent = md.price_history[-20:]
-                    if len(recent) > 1:
-                        returns = [recent[i+1]/recent[i] - 1 for i in range(len(recent)-1)]
-                        md.volatility = float(np.std(returns) * np.sqrt(252))
+                # Step 1.5: Populate liquidity fields from the raw market dict
+                md.yes_bid = bid_f
+                md.yes_ask = ask_f
+                md.yes_bid_qty = self._parse_int(mkt.get('yes_bid_qty'))
+                md.yes_ask_qty = self._parse_int(mkt.get('yes_ask_qty'))
+                # Compute spread_pct: (ask - bid) / ask
+                if bid_f is not None and ask_f is not None and ask_f > 0:
+                    md.spread_pct = (ask_f - bid_f) / ask_f
+                else:
+                    md.spread_pct = None
+
+                # ATR-based volatility via VolatilityAnalyzer (Step 1.3)
+                # Requires 14+ price points for ATR(period=14)
+                if len(md.price_history) > 13:
+                    md.volatility = self.volatility_analyzer.calculate_atr(md.price_history, period=14)
 
                 updated.append(ticker)
 
@@ -327,6 +352,48 @@ class MarketDataStreamer:
 
         except Exception as e:
             logger.error("Failed to update market data: %s", e)
+
+    # -------------------------------------------------------------------------
+    # Helpers
+    # -------------------------------------------------------------------------
+
+    def _parse_int(self, value) -> Optional[int]:
+        """
+        Step 1.5: Safely parse an int from various input types.
+        Handles None, int, float, and string.
+        """
+        if value is None:
+            return None
+        if isinstance(value, int):
+            return value
+        if isinstance(value, float):
+            return int(value) if not (value != value) else None  # NaN check
+        if isinstance(value, str):
+            try:
+                return int(float(value))
+            except (ValueError, TypeError):
+                return None
+        return None
+
+    def is_market_liquid(self, market_md: 'MarketData') -> tuple[bool, str]:
+        """
+        Step 2.1: Check if a market has sufficient liquidity for trading.
+        Returns (True, '') if liquid — returns (False, 'reason') if not.
+        Uses config thresholds: min bid, min bid qty, max spread, min ask.
+        """
+        if market_md.yes_bid is None or market_md.yes_bid < LIQUIDITY_MIN_BID_DOLLARS:
+            return False, f"bid_too_low_{market_md.yes_bid}"
+
+        if market_md.yes_bid_qty is not None and market_md.yes_bid_qty < LIQUIDITY_MIN_BID_QTY:
+            return False, f"insufficient_bid_qty_{market_md.yes_bid_qty}"
+
+        if market_md.spread_pct is not None and market_md.spread_pct > LIQUIDITY_SPREAD_MAX:
+            return False, f"spread_too_wide_{market_md.spread_pct:.1%}"
+
+        if market_md.yes_ask is None or market_md.yes_ask == 0:
+            return False, "no_ask"
+
+        return True, ""
 
     # -------------------------------------------------------------------------
     # Data access
