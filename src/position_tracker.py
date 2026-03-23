@@ -43,6 +43,7 @@ class Position:
     # ATR trailing stop
     atr_trailing_stop: float = 0.0
     atr_multiplier: float = 3.0
+    volatility: float = 0.0           # ATR value from market data (set each cycle)
     highest_price_since_entry: float = 0.0
 
     # Triple-barrier
@@ -113,10 +114,6 @@ class PositionTracker:
     def get_open_tickers(self) -> list[str]:
         """Tickers of all currently open positions."""
         return list(self._positions.keys())
-
-    def has_position(self, ticker: str) -> bool:
-        """True if we have an open position in this ticker."""
-        return ticker in self._positions
 
     def get_position(self, ticker: str) -> Optional[Position]:
         """Get Position object for a ticker, or None."""
@@ -231,20 +228,6 @@ class PositionTracker:
         price = pos.avg_fill_price
         vol_adjusted = base_tp_mult + (vol_scalar * current_volatility / price) if price > 0 else base_tp_mult
         pos.volatility_adjusted_tp_mult = min(vol_adjusted, vol_tp_cap)
-
-    def record_barrier_hit(self, ticker: str, barrier: str) -> None:
-        """
-        Step 5.2: Record which barrier was hit first (for triple-barrier analytics).
-        Only the first barrier to fire is recorded — subsequent barriers are logged in
-        barriers_triggered but do not overwrite barrier_hit_order.
-        """
-        if ticker not in self._positions:
-            return
-        pos = self._positions[ticker]
-        if pos.barrier_hit_order is None:
-            pos.barrier_hit_order = barrier
-            pos.barrier_hit_time = datetime.now(timezone.utc)
-        pos.barriers_triggered.append(barrier)
 
     def reduce_position(self, ticker: str, count: int, reason: str = "") -> None:
         """Partially close a position."""

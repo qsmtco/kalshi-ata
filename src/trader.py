@@ -536,18 +536,6 @@ class Trader:
         )
         self._send_telegram(msg)
 
-    def _send_new_trade_alert(self, trade: dict) -> None:
-        """Send Telegram alert for a new trade."""
-        ticker_short = trade.get('event_id', 'unknown')[-25:]
-        msg = (
-            f"🟢 *K-ATA NEW TRADE*\n"
-            f"`{ticker_short}`\n"
-            f"Action: *{trade.get('action', '?').upper()}* {trade.get('quantity', 0)} @ ${trade.get('price', 0):.4f}\n"
-            f"Strategy: {trade.get('strategy', '?')}\n"
-            f"Sentiment: {trade.get('sentiment_score', 'N/A')}"
-        )
-        self._send_telegram(msg)
-
     # =========================================================================
     # PHASE 4: Daily Summary
     # =========================================================================
@@ -1546,6 +1534,8 @@ class Trader:
             # Phase 6.5: Update volatility-adjusted TP each cycle
             current_volatility = getattr(market_md, 'volatility', None)
             if current_volatility:
+                # Also store on position so check_atr_trailing_stop can read it
+                pos.volatility = current_volatility
                 self.position_tracker.update_volatility_adjusted_tp(
                     pos.ticker, current_volatility)
 

@@ -58,43 +58,6 @@ def check_atr_trailing_stop(position, current_price: float,
     return ExitResult(should_exit=False, exit_type='none', reason='')
 
 
-def compute_time_decay_penalty(hours_remaining: float,
-                               full_horizon: float = 24.0,
-                               max_penalty: float = 0.20) -> float:
-    """
-    Step 6.1: Compute the TP penalty from time decay.
-    As the market approaches close, the TP target tightens to avoid
-    chasing wide targets in the final chaotic hours.
-    At full_horizon hours remaining: penalty = 0 (no effect)
-    At 0 hours remaining: penalty = max_penalty
-    Formula: linear interpolation from 0 to max_penalty
-    """
-    if hours_remaining <= 0:
-        return max_penalty
-    if hours_remaining >= full_horizon:
-        return 0.0
-    decay_rate = 1.0 - (hours_remaining / full_horizon)
-    return decay_rate * max_penalty
-
-
-def compute_volatility_scalar(current_volatility: float,
-                             avg_price: float,
-                             base_scalar: float = 0.3) -> float:
-    """
-    Step 6.2: Compute how much additional TP width current volatility justifies.
-    Higher volatility → price can move more between entry and exit → wider TP (more room).
-    Formula: additional_width = base_scalar × min(vol_fraction / 0.05, 1.0)
-    Returns ADDITIONAL TP width beyond base_tp_pct. Capped at 2× base_scalar.
-    """
-    if current_volatility is None or current_volatility <= 0 or avg_price <= 0:
-        return 0.0
-    # Normalize volatility as fraction of price
-    vol_fraction = current_volatility / avg_price
-    # Scale: at 5% vol fraction → full base_scalar; below → proportional
-    additional_width = base_scalar * min(vol_fraction / 0.05, 1.0)
-    return min(additional_width, base_scalar * 2)
-
-
 def check_liquidity_exit(position, market_md, min_bid_dollars: float = 0.05,
                           min_bid_qty: int = 10) -> ExitResult:
     """
@@ -154,28 +117,6 @@ def check_barrier_take_profit(position, current_price: float) -> ExitResult:
                     f"(+{pnl_pct:.0f}%, barrier_mult={threshold:.2f}, "
                     f"signal_conf={getattr(position, 'signal_confidence', 'N/A')})",
             urgency='high')
-    return ExitResult(should_exit=False, exit_type='none', reason='')
-
-
-def check_take_profit(position, current_price: float, threshold: float = None) -> ExitResult:
-    """
-    Exit if price has risen enough to lock in profit.
-    threshold: multiplier on entry price. None = use position.take_profit_pct (+50% default).
-    threshold=1.50 means exit if current >= entry * 1.50 (+50% profit).
-    """
-    if threshold is None:
-        # Per-position setting: take_profit_pct stored as 0.50 (= +50% above entry)
-        # Convert to threshold: entry * (1 + take_profit_pct) = entry * 1.50
-        take_profit_pct = getattr(position, 'take_profit_pct', 0.50)
-        threshold = 1.0 + take_profit_pct
-    if current_price >= position.avg_fill_price * threshold:
-        pnl_pct = (current_price - position.avg_fill_price) / position.avg_fill_price * 100
-        return ExitResult(
-            should_exit=True,
-            exit_type='take_profit',
-            reason=f"Take profit: ${current_price:.4f} >= ${position.avg_fill_price * threshold:.4f} (+{pnl_pct:.0f}%)",
-            urgency='high'
-        )
     return ExitResult(should_exit=False, exit_type='none', reason='')
 
 
