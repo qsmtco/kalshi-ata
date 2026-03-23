@@ -140,7 +140,6 @@ class PositionTracker:
 
     def add_position(self, ticker: str, event_id: str, strategy: str,
                     side: str, count: int, avg_fill_price: float,
-                    signal_score: float = 0.0,
                     signal_confidence: float = 0.5,  # Step 5.1: for barrier_tp_multiplier
                     stop_loss_pct: float = 0.40,
                     take_profit_pct: float = 0.50) -> None:
@@ -156,7 +155,7 @@ class PositionTracker:
             pos.avg_fill_price = total_cost / new_count
             pos.count = new_count
             pos.last_updated = now
-            pos.signal_at_entry = signal_score
+            pos.signal_at_entry = signal_confidence
             logger.info(f"Position increased: {ticker} -> {new_count} @ ${pos.avg_fill_price:.4f}")
         else:
             self._positions[ticker] = Position(
@@ -169,7 +168,9 @@ class PositionTracker:
                 open_time=now,
                 last_updated=now,
                 current_price=avg_fill_price,  # start at entry price
-                signal_at_entry=signal_score,
+                # Step 6.4: Initialize peak to entry price (not 0.0)
+                highest_price_since_entry=avg_fill_price,
+                signal_at_entry=signal_confidence,
                 stop_loss_pct=stop_loss_pct,
                 take_profit_pct=take_profit_pct,
                 # Step 3.1: Initialize partial exit tiers and counters

@@ -163,3 +163,13 @@ TIME_DECAY_FULL_HORIZON_HRS: float = float(os.environ.get('TIME_DECAY_FULL_HORIZ
 TIME_DECAY_MAX_PENALTY: float = float(os.environ.get('TIME_DECAY_MAX_PENALTY', '0.20'))
 
 
+
+# --- Exit Strategy Selector (Option A — Regime Lookup Table) ---
+ATR_MULT_LOW_VOL: float = float(os.environ.get('ATR_MULT_LOW_VOL', '2.5'))
+ATR_MULT_NORMAL_VOL: float = float(os.environ.get('ATR_MULT_NORMAL_VOL', '3.0'))
+ATR_MULT_HIGH_VOL: float = float(os.environ.get('ATR_MULT_HIGH_VOL', '3.5'))
+DRAWDOWN_OVERRIDE_PCT: float = float(os.environ.get('DRAWDOWN_OVERRIDE_PCT', '0.10'))
+PARTIAL_EXIT_PROFIT_THRESHOLD: float = float(os.environ.get('PARTIAL_EXIT_PROFIT_THRESHOLD', '0.05'))
+TREND_LOOKBACK: int = int(os.environ.get('TREND_LOOKBACK', '10'))
+REGIME_CONFIDENCE_MIN: float = float(os.environ.get('REGIME_CONFIDENCE_MIN', '0.3'))
+USE_REGIME_SELECTOR: bool = os.environ.get('USE_REGIME_SELECTOR', 'true').lower() == 'true'

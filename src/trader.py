@@ -23,6 +23,7 @@ from orderbook_analyzer import OrderBookAnalyzer
 from almgren_chriss import AlmgrenChrissExecutor
 from order_tracker import OrderTracker
 from position_tracker import PositionTracker
+from exit_selector import ExitStrategySelector
 from exit_rules import evaluate_all
 from market_selector import is_tradeable
 
@@ -36,6 +37,8 @@ class Trader:
         self.news_analyzer = NewsSentimentAnalyzer()
         self.arbitrage_analyzer = StatisticalArbitrageAnalyzer()
         self.volatility_analyzer = VolatilityAnalyzer()
+        # Exit strategy selector (Phase 5 — Option A regime lookup)
+        self.exit_selector = ExitStrategySelector(self.volatility_analyzer)
         self.risk_manager = RiskManager(bankroll)
         # Phase 1: Local position tracking — synced from API on startup
         self.position_tracker = PositionTracker()
@@ -1038,7 +1041,7 @@ class Trader:
                             tradeable, reason = is_tradeable(
                                 market,
                                 market_data_streamer=self.market_data_streamer,
-                                signal_score=sentiment_decision.get('sentiment_score', 0.0),
+                                signal_confidence=sentiment_decision.get('sentiment_score', 0.0),
                                 min_quality=30.0,
                             )
                             if not tradeable:
@@ -1104,7 +1107,7 @@ class Trader:
                         tradeable, reason = is_tradeable(
                             market1,
                             market_data_streamer=self.market_data_streamer,
-                            signal_score=execution_decision.get('confidence', 0.0) * 0.2,
+                            signal_confidence=execution_decision.get('confidence', 0.0) * 0.2,
                             min_quality=30.0,
                         )
                         if not tradeable:
@@ -1158,7 +1161,7 @@ class Trader:
                             tradeable, reason = is_tradeable(
                                 market,
                                 market_data_streamer=self.market_data_streamer,
-                                signal_score=volatility_decision.get('confidence', 0.0) * 0.2,
+                                signal_confidence=volatility_decision.get('confidence', 0.0) * 0.2,
                                 min_quality=30.0,
                             )
                             if not tradeable:
@@ -1349,7 +1352,7 @@ class Trader:
                 side='yes',
                 count=quantity,
                 avg_fill_price=price,
-                signal_score=float(trade_decision.get('confidence', 0.5)),
+                signal_confidence=float(trade_decision.get('confidence', 0.5)),
             )
 
             # Send notification
@@ -1415,6 +1418,9 @@ class Trader:
         # Remove from positions
         del self.current_positions[market_id]
 
+        # Step 6.2: Also close in position_tracker so exit loop stops processing it
+        self.position_tracker.close_position(market_id, reason=reason)
+
         # Send notification
         self.notifier.send_trade_notification(
             f"RISK MANAGEMENT: Closed {market_id} at ${exit_price:.2f}, P&L: ${pnl:.2f} ({reason})"
@@ -1446,7 +1452,14 @@ class Trader:
         """
         trade_id = f"exit_{strategy}_{ticker[:20]}_{int(time.time())}"
         price_cents = int(price * 100) if price <= 1 else int(price)
-        count = min(count, 200)  # API hard cap
+
+        # Step 6.3: Determine partial vs full BEFORE applying API cap
+        # Compare original values — don't let cap affect the decision
+        is_partial = exit_qty is not None and exit_qty < count
+
+        # Cap for API limit only AFTER the partial/full decision
+        capped_count = min(count, 200)
+        qty_to_sell = min(exit_qty, 200) if is_partial else capped_count
 
         # Build the sell order payload — same structure as buy
         order_payload = {
@@ -1454,7 +1467,7 @@ class Trader:
             'side': 'yes',
             'action': 'sell',
             'client_order_id': trade_id,
-            'count': count,
+            'count': qty_to_sell,  # use capped qty
             'yes_price': price_cents,
         }
 
@@ -1465,11 +1478,11 @@ class Trader:
             order = api_response.get('order', {})
             status = order.get('status', 'unknown')
             self.logger.info(
-                f"SELL EXIT: {count} {ticker[:30]} @ ${price:.4f} "
+                f"SELL EXIT: {qty_to_sell} {ticker[:30]} @ ${price:.4f} "
                 f"reason={exit_reason} status={status} method=FAK"
             )
             # Step 3.3: Local bookkeeping — partial vs full exit
-            if exit_qty is not None and exit_qty < count:
+            if is_partial:
                 self.position_tracker.reduce_position(ticker, exit_qty, reason=exit_reason)
                 self.logger.info(f"PARTIAL EXIT SUCCESS: {ticker[:20]} "
                                  f"{exit_qty} contracts @ ${price:.4f}")
@@ -1487,7 +1500,7 @@ class Trader:
             order = api_response.get('order', {})
             status = order.get('status', 'unknown')
             self.logger.info(
-                f"SELL LIMIT PLACED: {count} {ticker[:30]} @ ${price:.4f} "
+                f"SELL LIMIT PLACED: {qty_to_sell} {ticker[:30]} @ ${price:.4f} "
                 f"reason={exit_reason} status={status} method=limit — resting on book"
             )
             # Step 3.3: Same partial/full exit bookkeeping for GTC fallback
@@ -1527,6 +1540,15 @@ class Trader:
                 self.logger.debug(f"Exit check: zero price for {pos.ticker}")
                 continue
 
+            # Phase 5: Update ATR highest price tracker each cycle
+            self.position_tracker.update_highest_price(pos.ticker, current_price)
+
+            # Phase 6.5: Update volatility-adjusted TP each cycle
+            current_volatility = getattr(market_md, 'volatility', None)
+            if current_volatility:
+                self.position_tracker.update_volatility_adjusted_tp(
+                    pos.ticker, current_volatility)
+
             # Evaluate all exit rules (use close_date from market data for time remaining)
             close_date = getattr(market_md, 'close_date', None)
             hours_remaining = 999.0
@@ -1537,7 +1559,12 @@ class Trader:
                     hours_remaining = (close_dt - datetime.now(timezone.utc)).total_seconds() / 3600
                 except (ValueError, TypeError):
                     pass  # leave at 999.0
-            result = evaluate_all(pos, current_price, hours_remaining=hours_remaining)
+            # Phase 5: Use regime-based exit selector (Option A) or legacy stack
+            from config import USE_REGIME_SELECTOR
+            if USE_REGIME_SELECTOR:
+                result = self.exit_selector.select(pos, market_md, hours_remaining)
+            else:
+                result = evaluate_all(pos, current_price, hours_remaining=hours_remaining)
 
             if not result.should_exit:
                 continue
