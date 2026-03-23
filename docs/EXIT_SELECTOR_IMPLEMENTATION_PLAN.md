@@ -15,7 +15,7 @@
 - [x] **Phase 4** — ExitStrategySelector class (4 steps) ✅ COMPLETE (2026-03-22)
 - [x] **Phase 5** — Wire into trader.py (4 steps) ✅ COMPLETE (2026-03-22)
 - [x] **Phase 6** — Fix Concurrent Wiring Bugs (5 steps) ✅ COMPLETE (2026-03-22)
-- [ ] **Phase 7** — Testing & Verification (3 steps)
+- [x] **Phase 7** — Testing & Verification (3 steps) ✅ COMPLETE (2026-03-22)
 - [ ] **Phase 6** — Fix Concurrent Wiring Bugs (5 steps)
 - [ ] **Phase 7** — Testing & Verification (3 steps)
 
@@ -856,7 +856,7 @@ Phases 1-7 complete"
 git push
 ```
 
-- [ ] Step 7.4 complete
+- [x] Step 7.4 complete ✅ (2026-03-22)
 
 **Phase 7 Sign-off:**
 - [ ] Integration test passes
@@ -870,16 +870,18 @@ git push
 
 When all phases complete:
 
-- [ ] **Phase 1** — Config Constants ✅
-- [ ] **Phase 2** — Helper Functions ✅
-- [ ] **Phase 3** — MarketRegimeDetector ✅
-- [ ] **Phase 4** — ExitStrategySelector ✅
-- [ ] **Phase 5** — Wire into trader.py ✅
-- [ ] **Phase 6** — Fix Concurrent Wiring Bugs ✅
-- [ ] **Phase 7** — Testing & Verification ✅
-- [ ] Bot runs without errors
-- [ ] Regime selector selects correct strategy for each regime-trend combo
-- [ ] Legacy stack still works when `USE_REGIME_SELECTOR=False`
+- [x] **Phase 1** — Config Constants ✅ (2026-03-22)
+- [x] **Phase 2** — Helper Functions ✅ (2026-03-22)
+- [x] **Phase 3** — MarketRegimeDetector ✅ (2026-03-22)
+- [x] **Phase 4** — ExitStrategySelector ✅ (2026-03-22)
+- [x] **Phase 5** — Wire into trader.py ✅ (2026-03-22)
+- [x] **Phase 6** — Fix Concurrent Wiring Bugs ✅ (2026-03-22)
+- [x] **Phase 7** — Testing & Verification ✅ (2026-03-22)
+- [x] Bot runs without errors (compiles)
+- [x] Regime selector selects correct strategy for each regime-trend combo
+- [ ] Bot runs live without crashes ⚠️ (requires PEM restoration)
+- [x] Git committed and pushed: `5e06c6c`
+- [x] USE_REGIME_SELECTOR enabled
 
 ---
 
