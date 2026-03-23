@@ -1060,11 +1060,11 @@ When all phases are complete:
 - [x] **Phase 4** — All 4 steps ✅ COMPLETE (2026-03-22)
 - [x] **Phase 5** — All 4 steps ✅ COMPLETE (2026-03-22)
 - [x] **Phase 6** — All 4 steps ✅ COMPLETE (2026-03-22)
-- [ ] **Phase 7** — All 5 steps, Integration & deployment
-- [ ] Bot runs for 10+ minutes without crash
-- [ ] No Python exceptions in `/tmp/kalshi-api.log`
-- [ ] Git committed and pushed
-- [ ] README updated
+- [x] **Phase 7** — All 5 steps ✅ COMPLETE (2026-03-22)
+- [ ] Bot runs for 10+ minutes without crash ⚠️ (requires PEM restoration from kalshi.com)
+- [ ] No Python exceptions in `/tmp/kalshi-api.log` ⚠️ (requires PEM restoration)
+- [x] Git committed and pushed ✅
+- [x] README updated ✅
 
 ---
 
