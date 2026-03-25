@@ -17,6 +17,13 @@ class BotInterface {
         this.kalshiApiBaseUrl = process.env.KALSHI_API_BASE_URL || null;
         this.botStateScript = process.env.BOT_STATE_SCRIPT || path.join(__dirname, 'src/bot_state.py');
         
+        // Watchdog config: auto-restart Python if it dies unexpectedly
+        this._intentionalStop = false;       // set true when we deliberately stop
+        this._restartHistory = [];           // timestamps of recent restarts
+        this._watchdogRestartDelayMs = 5000;  // wait 5s before restarting (avoid rapid crash loops)
+        this._watchdogMaxRestarts = 3;        // max restarts per watchdog window
+        this._watchdogWindowMs = 10 * 60 * 1000; // per 10-minute window
+
         this.setupExpress();
         this.setupWebSocket();
     }
@@ -377,6 +384,7 @@ class BotInterface {
             return;
         }
 
+        this._intentionalStop = false;  // reset watchdog — this is an intentional start
         console.log('Starting Python bot...');
         const env = this.buildPythonEnv();
         this.pythonProcess = spawn('python3', [this.pythonBotPath], {
@@ -407,12 +415,27 @@ class BotInterface {
 
         this.pythonProcess.on('close', (code) => {
             console.log(`Python bot exited with code ${code}`);
+            const wasIntentional = this._intentionalStop;
             this.pythonProcess = null;
+
             this.broadcastToClients({
                 type: 'bot_stopped',
                 code,
+                intentional: wasIntentional,
                 timestamp: new Date().toISOString()
             });
+
+            // Telegram alert on any crash or stop
+            this._sendTelegramAlert(
+                wasIntentional
+                    ? `K-ATA stopped intentionally (code ${code})`
+                    : `🚨 K-ATA CRASHED — exit code ${code} — auto-restarting...`
+            );
+
+            // WATCHDOG: auto-restart if Python died unexpectedly
+            if (!wasIntentional) {
+                this._watchdogRestart();
+            }
         });
 
         this.startTime = new Date();
@@ -425,6 +448,7 @@ class BotInterface {
         }
 
         console.log('Stopping Python bot...');
+        this._intentionalStop = true;  // signal to watchdog: don't auto-restart
         // Store reference to the process we're killing so the timeout only affects THIS process.
         const processToKill = this.pythonProcess;
         processToKill.kill('SIGTERM');
@@ -569,6 +593,56 @@ class BotInterface {
                 reject(error);
             });
         });
+    }
+
+    _watchdogRestart() {
+        // Clean old restarts outside the window
+        const now = Date.now();
+        this._restartHistory = this._restartHistory.filter(t => now - t < this._watchdogWindowMs);
+
+        const recentRestarts = this._restartHistory.length;
+        if (recentRestarts >= this._watchdogMaxRestarts) {
+            const minutes = Math.round(this._watchdogWindowMs / 60000);
+            console.error(
+                `[WATCHDOG] Too many restarts (${recentRestarts}/${this._watchdogMaxRestarts}) ` +
+                `in the last ${minutes}m — NOT restarting. Manual intervention required.`
+            );
+            this._sendTelegramAlert(
+                `🚨 K-ATA WATCHDOG: Too many crashes (${recentRestarts}) in ${minutes} min. Manual restart required.`
+            );
+            return;
+        }
+
+        const backoff = this._watchdogRestartDelayMs * (recentRestarts + 1); // longer backoff each time
+        console.log(
+            `[WATCHDOG] Python died unexpectedly. ` +
+            `Restarting in ${backoff / 1000}s ` +
+            `(crash ${recentRestarts + 1}/${this._watchdogMaxRestarts} in window)...`
+        );
+
+        setTimeout(() => {
+            if (!this._intentionalStop && !this.pythonProcess) {
+                console.log('[WATCHDOG] Proceeding with auto-restart...');
+                this._restartHistory.push(Date.now());
+                this.startPythonBot();
+            }
+        }, backoff);
+    }
+
+    _sendTelegramAlert(message) {
+        const token = process.env.TELEGRAM_BOT_TOKEN;
+        const chatId = process.env.TELEGRAM_CHAT_ID;
+        if (!token || !chatId || token === 'your_telegram_bot_token') return;
+
+        fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                chat_id: chatId,
+                text: `[K-ATA] ${message}`,
+                parse_mode: 'Markdown'
+            })
+        }).catch(err => console.error('[Telegram] Alert failed:', err.message));
     }
 
     close() {
