@@ -91,17 +91,34 @@ class KalshiAPI:
             self.private_key = None
             logging.warning(f"KalshiAPI: Private key file not found at {key_path} — requests will fail")
 
+        # H1: Fail fast if private key missing in production mode
+        demo_mode = os.environ.get("KALSHI_DEMO_MODE", "true").lower() == "true"
+        if self.private_key is None and not demo_mode:
+            raise RuntimeError(
+                f"Kalshi private key not found at {key_path} — cannot run in production mode. "
+                f"Set KALSHI_DEMO_MODE=true for demo mode."
+            )
+
         self.logger = logging.getLogger(__name__)
         self.max_retries = max_retries
         self.retry_delay = retry_delay
+        self._clock_offset = 0.0  # seconds to add to local time for signatures
+        self._clock_offset_logged = False  # only log warning once
+        # Rate limiting: token bucket
+        self._rate_limit_tokens = 100  # start with full bucket
+        self._rate_limit_max = 100
+        self._rate_limit_refill_rate = 100 / 60.0  # 100 tokens per minute
+        self._last_rate_limit_check = time.time()
 
     def _build_auth_headers(self, method: str, path: str) -> Dict[str, str]:
         """
         Build Kalshi RSA-PSS authentication headers.
         Per docs: sign timestamp + HTTP method + path (no query params).
         Path must include /trade-api/v2 prefix for signature.
+        Applies clock offset adjustment for signature timestamps.
         """
-        timestamp_ms = int(datetime.datetime.now().timestamp() * 1000)
+        # Apply clock offset to compensate for server time differences
+        timestamp_ms = int((datetime.datetime.now().timestamp() + self._clock_offset) * 1000)
         # Strip query parameters from path before signing
         path_clean = path.split("?")[0]
         
@@ -127,6 +144,60 @@ class KalshiAPI:
             "Content-Type": "application/json",
         }
 
+    def _wait_for_rate_limit(self) -> None:
+        """Check rate limit tokens and wait if depleted. Token bucket implementation."""
+        now = time.time()
+        elapsed = now - self._last_rate_limit_check
+        
+        # Refill tokens based on elapsed time
+        self._rate_limit_tokens = min(
+            self._rate_limit_max,
+            self._rate_limit_tokens + elapsed * self._rate_limit_refill_rate
+        )
+        self._last_rate_limit_check = now
+        
+        # If no tokens available, sleep until we have one
+        if self._rate_limit_tokens < 1.0:
+            wait_time = (1.0 - self._rate_limit_tokens) / self._rate_limit_refill_rate
+            self.logger.warning(f"Rate limit reached — sleeping {wait_time:.1f}s")
+            time.sleep(wait_time)
+            self._rate_limit_tokens = 1.0
+        
+        # Consume one token
+        self._rate_limit_tokens -= 1.0
+
+    def _update_rate_limit_from_response(self, response: requests.Response) -> None:
+        """Update rate limit state from response headers."""
+        try:
+            remaining = response.headers.get('X-RateLimit-Remaining')
+            if remaining:
+                self._rate_limit_tokens = max(0, float(remaining))
+        except (ValueError, TypeError):
+            pass
+
+    def _update_clock_offset(self, response: requests.Response) -> None:
+        """Extract server time from response Date header and update clock offset."""
+        try:
+            date_header = response.headers.get('Date')
+            if date_header:
+                from email.utils import parsedate_to_datetime
+                server_time = parsedate_to_datetime(date_header).timestamp()
+                local_time = datetime.datetime.now().timestamp()
+                new_offset = server_time - local_time
+                
+                # Only log if significant change or first time
+                if abs(new_offset - self._clock_offset) > 1.0 or not self._clock_offset_logged:
+                    self._clock_offset = new_offset
+                    if abs(new_offset) > 30 and not self._clock_offset_logged:
+                        self.logger.warning(
+                            f"⚠️ Clock skew detected: {new_offset:.1f}s offset from server time"
+                        )
+                        self._clock_offset_logged = True
+                    else:
+                        self.logger.debug(f"Clock offset updated: {new_offset:.1f}s")
+        except Exception as e:
+            self.logger.debug(f"Could not extract server time: {e}")
+
     def _handle_request(self, method, endpoint, **kwargs):
         url = f"{self.base_url}{endpoint}"
         headers = self._build_auth_headers(method, endpoint)
@@ -135,8 +206,18 @@ class KalshiAPI:
 
         while attempt < self.max_retries:
             try:
+                # H3: Check rate limit before each request
+                self._wait_for_rate_limit()
+                
                 response = requests.request(method, url, headers=headers, timeout=30, **kwargs)
                 response.raise_for_status()
+                
+                # Update rate limit from response headers
+                self._update_rate_limit_from_response(response)
+                
+                # Update clock offset from server response
+                self._update_clock_offset(response)
+                
                 if response.content:
                     return response.json()
                 return {}
@@ -177,6 +258,36 @@ class KalshiAPI:
     # ---- Market & event data ----
     def get_markets(self, params=None):
         return self._handle_request("GET", "/markets", params=params or {})
+
+    def get_series(self, params=None):
+        """
+        Fetch series list from Kalshi.
+        No auth required (public endpoint).
+        Returns {'series': [...], 'cursor': ...} or None on failure.
+
+        Usage:
+            resp = api.get_series({'limit': 100})
+            series = resp.get('series', [])
+        """
+        return self._handle_request("GET", "/series", params=params or {})
+
+    def get_markets_by_series(self, series_ticker, params=None):
+        """
+        Fetch markets for a specific series ticker.
+        This is how we access NBA/MLB/NFL game markets — the general /markets
+        endpoint returns illiquid multivolume products; series-scoped queries
+        return the actual game winner markets with real bids.
+
+        Args:
+            series_ticker: e.g. 'KXNBAGAME', 'KXMLBGAME', 'KXNFL'
+            params: optional dict with 'status', 'limit', 'cursor' keys
+
+        Returns:
+            {'markets': [...], 'cursor': ...} or None on failure.
+        """
+        params = dict(params or {})
+        params['series_ticker'] = series_ticker
+        return self._handle_request("GET", "/markets", params=params)
 
     def get_market(self, market_ticker, params=None):
         return self._handle_request(

@@ -63,6 +63,7 @@ class Logger:
                     )),
                     metadata TEXT,
                     closed_at DATETIME,
+                    is_paper INTEGER DEFAULT 0,
                     UNIQUE(strategy, market_id, created_at)
                 )
             ''')
@@ -76,8 +77,8 @@ class Logger:
                         market_id, strategy, action, quantity, entry_price,
                         market_title, exit_price, pnl, confidence,
                         position_size_pct, stop_loss_pct, take_profit_pct,
-                        exit_reason, metadata, closed_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        exit_reason, metadata, closed_at, is_paper
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ''', (
                     trade_data['market_id'],
                     trade_data['strategy'],
@@ -93,6 +94,7 @@ class Logger:
                     trade_data.get('take_profit_pct'),
                     trade_data.get('exit_reason'),
                     trade_data.get('metadata'),
-                    trade_data.get('closed_at')
+                    trade_data.get('closed_at'),
+                    1 if trade_data.get('is_paper', False) else 0
                 ))
                 conn.commit()

@@ -114,13 +114,16 @@ class RiskManager:
             return None, None, None
 
     def calculate_position_size_kelly(self, confidence: float = 0.5, win_loss_ratio: float = 2.0,
-                                     volatility: float = None) -> float:
+                                     volatility: float = None, price: float = None) -> float:
         """
         Volatility-Adjusted Fractional Kelly position sizing.
         
         Uses historical win rate (p) and win/loss ratio (b) from closed trades.
         Falls back to conservative defaults when insufficient history (< 20 trades).
         Applies volatility adjustment to reduce position size in high-vol environments.
+        
+        For binary markets, caps position so worst-case loss ≤ max_position_pct of bankroll.
+        Worst-case loss = quantity * max(price, 1-price) for binary outcomes.
         
         Formula: f* = (b*p - q) / b  [Full Kelly]
         Then: scaled = full_kelly * 0.25 * vol_scalar * confidence_modifier
@@ -134,6 +137,7 @@ class RiskManager:
             confidence: Signal strength modifier (0-1)
             win_loss_ratio: Expected win/loss ratio (fallback only)
             volatility: Annualized volatility (e.g., 0.15 for 15%). If None, no vol adjustment.
+            price: Current price for binary outcome worst-case loss calculation
 
         Returns:
             Position size as fraction of bankroll
@@ -184,6 +188,23 @@ class RiskManager:
         
         # Step 4: Cap at configured max
         position_size = min(kelly_fraction, MAX_POSITION_SIZE_PERCENTAGE)
+        
+        # Step 5: Binary outcome worst-case loss cap
+        # For binary markets, worst-case = total loss = qty * max(price, 1-price)
+        # Cap so worst_case_loss ≤ MAX_POSITION_SIZE_PERCENTAGE of bankroll
+        if price is not None and 0 < price < 1:
+            worst_case_per_contract = max(price, 1 - price)
+            # position_size = fraction of bankroll to risk
+            # worst_case_loss = position_value * worst_case_per_contract / price
+            # position_value = position_size * bankroll
+            # worst_case_loss = position_size * bankroll * worst_case_per_contract / price
+            # We want: worst_case_loss <= MAX_POSITION_SIZE_PERCENTAGE * bankroll
+            # So: position_size * worst_case_per_contract / price <= MAX_POSITION_SIZE_PERCENTAGE
+            # position_size <= MAX_POSITION_SIZE_PERCENTAGE * price / worst_case_per_contract
+            binary_cap = MAX_POSITION_SIZE_PERCENTAGE * price / worst_case_per_contract
+            if binary_cap < position_size:
+                logger.info(f"Kelly: binary cap {binary_cap:.2%} < kelly {position_size:.2%} (price={price:.3f})")
+                position_size = binary_cap
         
         if kelly_full > 0:
             return max(position_size, 0.01)

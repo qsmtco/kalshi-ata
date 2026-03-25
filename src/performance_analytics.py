@@ -2,6 +2,8 @@
 """Advanced performance analytics module for Phase 3 - Kalshi trading bot."""
 
 import logging
+import json
+import os
 import pandas as pd
 import numpy as np
 from typing import Dict, List, Optional, Any, Tuple
@@ -28,6 +30,8 @@ class Trade:
     holding_period: Optional[float] = None  # hours
     exit_reason: Optional[str] = None
     confidence: Optional[float] = None
+    fees: float = 0.0  # H5: Track fees for accurate P&L
+    is_paper: bool = False  # H6: Distinguish paper trades from real trades
 
     def __post_init__(self):
         if self.entry_time is None:
@@ -38,17 +42,21 @@ class Trade:
         """Check if trade is closed."""
         return self.exit_price is not None
 
-    def close_trade(self, exit_price: float, exit_reason: str = 'manual'):
-        """Close the trade and calculate P&L."""
+    def close_trade(self, exit_price: float, exit_reason: str = 'manual', fee: float = 0.0):
+        """Close the trade and calculate P&L (minus fees)."""
         self.exit_price = exit_price
         self.exit_time = datetime.now()
         self.exit_reason = exit_reason
+        self.fees = fee  # H5: Store fees
 
-        # Calculate P&L
+        # Calculate P&L (before fees)
         if self.side.lower() == 'buy':
-            self.pnl = (exit_price - self.entry_price) * self.quantity
+            gross_pnl = (exit_price - self.entry_price) * self.quantity
         else:  # sell/short
-            self.pnl = (self.entry_price - exit_price) * self.quantity
+            gross_pnl = (self.entry_price - exit_price) * self.quantity
+        
+        # H5: Subtract fees from realized P&L
+        self.pnl = gross_pnl - self.fees
 
         # Calculate percentage return
         entry_value = self.entry_price * self.quantity
@@ -66,11 +74,34 @@ class PerformanceAnalytics:
         self.trades: List[Trade] = []
         self.daily_pnl: Dict[str, float] = defaultdict(float)
         self.strategy_performance: Dict[str, Dict[str, Any]] = defaultdict(dict)
+        self._daily_pnl_path = os.path.join(os.path.dirname(__file__), '..', 'data', 'daily_pnl.json')
+        self._load_daily_pnl()
 
-    def record_trade(self, trade: Trade):
-        """Record a new trade."""
+    def _load_daily_pnl(self):
+        """Load persisted daily P&L from file on startup."""
+        try:
+            if os.path.exists(self._daily_pnl_path):
+                with open(self._daily_pnl_path, 'r') as f:
+                    data = json.load(f)
+                    self.daily_pnl = defaultdict(float, data)
+                    logger.info(f"Loaded daily P&L from file: {len(self.daily_pnl)} dates")
+        except Exception as e:
+            logger.warning(f"Failed to load daily_pnl.json: {e}")
+
+    def _save_daily_pnl(self):
+        """Persist daily P&L to file after updates."""
+        try:
+            os.makedirs(os.path.dirname(self._daily_pnl_path), exist_ok=True)
+            with open(self._daily_pnl_path, 'w') as f:
+                json.dump(dict(self.daily_pnl), f, indent=2)
+        except Exception as e:
+            logger.warning(f"Failed to save daily_pnl.json: {e}")
+
+    def record_trade(self, trade: Trade, is_paper: bool = False):
+        """Record a new trade. Set is_paper=True for paper trades."""
+        trade.is_paper = is_paper
         self.trades.append(trade)
-        logger.info(f"Recorded trade: {trade.strategy} {trade.side} {trade.quantity} "
+        logger.info(f"Recorded {'paper ' if is_paper else ''}trade: {trade.strategy} {trade.side} {trade.quantity} "
                    f"units of {trade.market_id} at ${trade.entry_price:.2f}")
 
     def close_trade(self, trade_id: str, exit_price: float, exit_reason: str = 'manual'):
@@ -82,6 +113,7 @@ class PerformanceAnalytics:
                 # Update daily P&L
                 date_key = trade.exit_time.strftime('%Y-%m-%d')
                 self.daily_pnl[date_key] += trade.pnl
+                self._save_daily_pnl()  # Persist after each update
 
                 logger.info(f"Closed trade {trade_id}: P&L ${trade.pnl:.2f} ({trade.pnl_pct:.2f}%)")
                 return True
@@ -90,16 +122,19 @@ class PerformanceAnalytics:
         return False
 
     def get_trade_statistics(self) -> Dict[str, Any]:
-        """Get comprehensive trade statistics."""
-        if not self.trades:
+        """Get comprehensive trade statistics (excludes paper trades)."""
+        # H6: Filter out paper trades
+        real_trades = [t for t in self.trades if not t.is_paper]
+        
+        if not real_trades:
             return {'total_trades': 0}
 
-        closed_trades = [t for t in self.trades if t.is_closed]
+        closed_trades = [t for t in real_trades if t.is_closed]
 
         if not closed_trades:
             return {
-                'total_trades': len(self.trades),
-                'open_trades': len(self.trades),
+                'total_trades': len(real_trades),
+                'open_trades': len(real_trades),
                 'closed_trades': 0
             }
 
@@ -331,23 +366,16 @@ class PerformanceAnalytics:
     
     def get_daily_pnl(self) -> float:
         """
-        Calculate P&L for current trading day (UTC).
+        Get P&L for current trading day (UTC).
+        Uses persisted daily_pnl dict for restart survival.
         
         Returns:
             float: Net P&L for today (positive = profit, negative = loss)
         """
-        today_start = datetime.utcnow().replace(
-            hour=0, minute=0, second=0, microsecond=0
-        )
+        today_key = datetime.utcnow().strftime('%Y-%m-%d')
+        daily_pnl = self.daily_pnl.get(today_key, 0.0)
         
-        today_trades = [
-            t for t in self.trades 
-            if t.entry_time and t.entry_time >= today_start
-        ]
-        
-        daily_pnl = sum(t.pnl for t in today_trades if t.pnl is not None)
-        
-        logger.debug(f"Daily P&L: ${daily_pnl:.2f} from {len(today_trades)} trades")
+        logger.debug(f"Daily P&L: ${daily_pnl:.2f} from persisted data")
         
         return daily_pnl
     

@@ -13,7 +13,7 @@ from unittest.mock import Mock, patch, MagicMock
 # Add src directory to path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
 
-from settings_manager import SettingsManager, BotSettings
+from settings_manager import SettingsManager
 from market_data_streamer import MarketDataStreamer, MarketData
 from performance_analytics import PerformanceAnalytics, Trade
 from trader import Trader

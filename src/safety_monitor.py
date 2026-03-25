@@ -47,21 +47,35 @@ class CircuitBreaker:
         self.state = CircuitState.ACTIVE
         self.state_since = datetime.now()
         self.pause_reason: Optional[str] = None
+        self.needs_alert: bool = False  # Set True if loaded in HALTED state
         self._load_state()
     
     def _load_state(self) -> None:
         """Load persisted state from file if exists."""
-        if os.path.exists(self.state_file):
-            try:
-                with open(self.state_file, 'r') as f:
-                    data = json.load(f)
-                    self.state = CircuitState(data.get('state', 'ACTIVE'))
-                    self.state_since = datetime.fromisoformat(data.get('state_since', datetime.now().isoformat()))
-                    self.pause_reason = data.get('reason')
-            except (json.JSONDecodeError, ValueError) as e:
-                # Corrupted state file - reset to ACTIVE
-                print(f"WARN: Corrupted circuit breaker state file: {e}")
-                self._reset_to_active()
+        if not os.path.exists(self.state_file):
+            # Missing state file - default to HALTED for safety (first run requires manual start)
+            print(f"WARN: Circuit breaker state file missing - defaulting to HALTED")
+            self.state = CircuitState.HALTED
+            self.state_since = datetime.now()
+            self.pause_reason = "State file missing - manual start required"
+            self.needs_alert = True
+            self._save_state()
+            return
+
+        try:
+            with open(self.state_file, 'r') as f:
+                data = json.load(f)
+                self.state = CircuitState(data.get('state', 'ACTIVE'))
+                self.state_since = datetime.fromisoformat(data.get('state_since', datetime.now().isoformat()))
+                self.pause_reason = data.get('reason')
+        except (json.JSONDecodeError, ValueError) as e:
+            # Corrupted state file - default to HALTED for safety
+            print(f"WARN: Corrupted circuit breaker state file: {e} - defaulting to HALTED")
+            self.state = CircuitState.HALTED
+            self.state_since = datetime.now()
+            self.pause_reason = f"Corrupted state file: {e}"
+            self.needs_alert = True
+            self._save_state()
     
     def _save_state(self) -> None:
         """Persist state to file for crash recovery."""
@@ -115,10 +129,14 @@ class CircuitBreaker:
         """
         Attempt to resume trading.
         Only allowed if currently PAUSED_ERROR (auto-resume).
-        PAUSED_DRAWDOWN requires manual intervention.
+        PAUSED_DRAWDOWN and HALTED require manual intervention.
         """
         if self.state == CircuitState.PAUSED_DRAWDOWN:
             print("CIRCUIT BREAKER: Cannot auto-resume from PAUSED_DRAWDOWN - manual intervention required")
+            return False
+        
+        if self.state == CircuitState.HALTED:
+            print("CIRCUIT BREAKER: Cannot auto-resume from HALTED - use manual_resume()")
             return False
         
         if self.state == CircuitState.PAUSED_ERROR:
@@ -127,6 +145,18 @@ class CircuitBreaker:
             return True
         
         return False  # Already ACTIVE
+    
+    def manual_resume(self) -> bool:
+        """
+        Manually resume trading from any halted state.
+        Use this to clear HALTED or PAUSED_DRAWDOWN states.
+        """
+        if self.state == CircuitState.ACTIVE:
+            return False  # Already active
+        
+        self._reset_to_active()
+        print(f"CIRCUIT BREAKER: Manually resumed to ACTIVE from {self.state.value}")
+        return True
     
     def check_auto_reset(self, api_error_rate: float) -> bool:
         """

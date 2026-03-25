@@ -39,6 +39,21 @@ class StatisticalArbitrageAnalyzer:
                 'reason': 'Insufficient data points'
             }
 
+        # Ensure series are same length (they can diverge if markets were added at different times)
+        if len(series1) != len(series2):
+            min_len = min(len(series1), len(series2))
+            series1 = series1[-min_len:]
+            series2 = series2[-min_len:]
+
+        # Guard: cointegration requires variance in both series
+        if np.std(series1) < 1e-8 or np.std(series2) < 1e-8:
+            return {
+                'cointegrated': False,
+                'p_value': 1.0,
+                'confidence': 0.0,
+                'reason': 'Series is constant (zero variance)'
+            }
+
         try:
             # Perform cointegration test
             coint_t, p_value, crit_values = coint(series1, series2)
@@ -82,6 +97,12 @@ class StatisticalArbitrageAnalyzer:
             Spread analysis results
         """
         try:
+            # Align series lengths (they can diverge if markets were added at different times)
+            if len(series1) != len(series2):
+                min_len = min(len(series1), len(series2))
+                series1 = series1[-min_len:]
+                series2 = series2[-min_len:]
+
             # Convert to numpy arrays
             s1 = np.array(series1, dtype=float)
             s2 = np.array(series2, dtype=float)
@@ -223,7 +244,7 @@ class StatisticalArbitrageAnalyzer:
                                   f"(z-score: {analysis['z_score']:.2f})")
 
                 except Exception as e:
-                    logger.error(f"Error analyzing pair {market1.get('id')} vs {market2.get('id')}: {e}")
+                    logger.error(f"Error analyzing pair {market1.get('market_id')} vs {market2.get('market_id')}: {e}")
 
         # Sort by confidence (highest first)
         opportunities.sort(key=lambda x: x['confidence'], reverse=True)

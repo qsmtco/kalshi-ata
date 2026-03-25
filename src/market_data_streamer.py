@@ -7,15 +7,89 @@ import threading
 import numpy as np
 from typing import Dict, List, Optional, Any, Callable, Union
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import requests
 from volatility_analyzer import VolatilityAnalyzer
 from config import LIQUIDITY_MIN_BID_DOLLARS, LIQUIDITY_MIN_BID_QTY, LIQUIDITY_SPREAD_MAX
 
 # Module constants
 MAX_PRICE_HISTORY = 200  # Max entries in rolling price history
+SERIES_DISCOVERY_INTERVAL = 1800  # seconds between full series rescans (30 min)
+SERIES_MAX_PER_CYCLE = 15        # max series to fetch per market update cycle
+SERIES_MARKET_LIMIT = 50         # markets to fetch per series per cycle
 
 logger = logging.getLogger(__name__)
+
+
+class SeriesDiscovery:
+    """
+    Discovers and caches sports/game series tickers from Kalshi.
+
+    The general /markets endpoint returns illiquid multivolume products.
+    Real game winner markets (NBA, MLB, NFL, etc.) are only accessible
+    via series-scoped queries: /markets?series_ticker=KXNBAGAME.
+
+    This class maintains a live list of sports-series tickers by scanning
+    the full series catalog and filtering on ticker/title keywords.
+    Series don't change often — we cache for SERIES_DISCOVERY_INTERVAL seconds.
+    """
+
+    SPORTS_TICKER_MARKERS = [
+        'NBAGAME', 'MLBGAME', 'NHLGAME', 'NFL', 'SOCCER', 'TENNIS',
+        'UFC', 'MMA', 'BOXING', 'GOLF', 'NCAAB', 'NCAAF',
+        'WNBA', 'MLS', 'EUROLEAGUE', 'FIBA', 'Wimbledon',
+    ]
+    SPORTS_TITLE_MARKERS = [
+        'nba', 'nfl', 'nhl', 'mlb', 'soccer', 'tennis',
+        'ufc', 'mma', 'boxing', 'golf', 'college basketball',
+        'college football', 'wnba', 'major league soccer',
+    ]
+
+    def __init__(self, api_client):
+        self.api_client = api_client
+        self._series_cache: Dict[str, dict] = {}
+        self._last_discovery_ts: Optional[datetime] = None
+
+    def discover(self, force: bool = False) -> List[dict]:
+        """Return cached sports series, refreshing if stale."""
+        now = datetime.now()
+        stale = (
+            self._last_discovery_ts is None
+            or (now - self._last_discovery_ts).total_seconds() > SERIES_DISCOVERY_INTERVAL
+        )
+        if not force and not stale:
+            return list(self._series_cache.values())
+        all_series = self._fetch_all_series()
+        sports = [s for s in all_series if self._is_sports_series(s)]
+        self._series_cache = {s['ticker']: s for s in sports}
+        self._last_discovery_ts = now
+        logger.info("SeriesDiscovery: refreshed — %d total, %d sports",
+                    len(all_series), len(sports))
+        return sports
+
+    def _fetch_all_series(self) -> List[dict]:
+        all_series = []
+        cursor = None
+        while True:
+            params = {'limit': 100}
+            if cursor:
+                params['cursor'] = cursor
+            resp = self.api_client.get_series(params)
+            batch = (resp or {}).get('series', [])
+            all_series.extend(batch)
+            cursor = (resp or {}).get('cursor')
+            if not cursor:
+                break
+            time.sleep(0.2)
+        return all_series
+
+    def _is_sports_series(self, series: dict) -> bool:
+        ticker = series.get('ticker', '').upper()
+        title = series.get('title', '').lower()
+        return (
+            any(m in ticker for m in self.SPORTS_TICKER_MARKERS)
+            or any(m in title for m in self.SPORTS_TITLE_MARKERS)
+        )
 
 
 @dataclass
@@ -75,7 +149,9 @@ class MarketDataStreamer:
         self.running = False
         self.thread: Optional[threading.Thread] = None
         self.last_update = datetime.now()
-        self.volatility_analyzer = VolatilityAnalyzer()  # Step 1.3: ATR via VolatilityAnalyzer
+        self.volatility_analyzer = VolatilityAnalyzer()
+        self.series_discovery = SeriesDiscovery(api_client)
+        self._fetch_lock = threading.Lock()  # guard concurrent _update_market_data calls
 
     # -------------------------------------------------------------------------
     # Phase 1 helpers: price extraction + liquidity check
@@ -248,6 +324,43 @@ class MarketDataStreamer:
     # -------------------------------------------------------------------------
     # Data fetching
     # -------------------------------------------------------------------------
+
+    def _fetch_markets_from_series(self) -> List[dict]:
+        """
+        Fetch liquid game markets from sports series.
+
+        The general /markets endpoint returns illiquid multivolume products.
+        Real NBA/MLB/NFL game markets only appear via series-scoped queries.
+
+        We sort series to prioritize GAME-series first (most trading activity).
+        This matters because SERIES_MAX_PER_CYCLE limits how many we can fetch per cycle.
+
+        Returns:
+            List of raw market dicts (Kalshi API format).
+        """
+        sports_series = self.series_discovery.discover()
+        if not sports_series:
+            return []
+
+        def series_priority(s: dict) -> tuple:
+            ticker = s.get('ticker', '').upper()
+            return (0 if 'GAME' in ticker else 1, ticker)
+
+        sorted_series = sorted(sports_series, key=series_priority)
+        all_markets = []
+        for series in sorted_series[:SERIES_MAX_PER_CYCLE]:
+            try:
+                resp = self.api_client.get_markets_by_series(
+                    series['ticker'],
+                    params={'status': 'open', 'limit': SERIES_MARKET_LIMIT}
+                )
+                markets = (resp or {}).get('markets', [])
+                all_markets.extend(markets)
+                time.sleep(0.15)
+            except Exception as e:
+                logger.warning("Failed to fetch markets for series %s: %s",
+                              series['ticker'], e)
+        return all_markets
 
     def _update_market_data(self):
         """

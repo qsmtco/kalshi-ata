@@ -3,6 +3,8 @@
 
 import requests
 import logging
+import json
+import os
 from typing import Dict, List, Optional, Any
 from datetime import datetime, timedelta
 from textblob import TextBlob
@@ -11,6 +13,9 @@ from config import NEWS_API_KEY, NEWS_API_BASE_URL
 
 logger = logging.getLogger(__name__)
 
+# Daily request budget for NewsAPI (free tier = 100/day, we use 50 to be safe)
+NEWS_API_DAILY_BUDGET = 50
+
 class NewsSentimentAnalyzer:
     """Analyzes news sentiment for trading signals."""
 
@@ -18,6 +23,54 @@ class NewsSentimentAnalyzer:
         self.api_key = NEWS_API_KEY
         self.base_url = NEWS_API_BASE_URL
         self.session = requests.Session()
+        # In-memory news cache: keyed by query, value is (articles, fetch_time)
+        # Cache TTL of 10 minutes to avoid burning through NewsAPI's 100 req/day limit.
+        self._news_cache: Dict[str, tuple] = {}
+        self._cache_ttl_seconds = 600
+        # Track consecutive 429s to implement backoff
+        self._consecutive_429s = 0
+        # H4: Daily budget tracking
+        self._usage_file = os.path.join(os.path.dirname(__file__), '..', 'data', 'news_api_usage.json')
+        self._daily_budget = NEWS_API_DAILY_BUDGET
+
+    def _load_usage(self) -> Dict[str, Any]:
+        """Load usage data from file."""
+        try:
+            if os.path.exists(self._usage_file):
+                with open(self._usage_file, 'r') as f:
+                    return json.load(f)
+        except Exception as e:
+            logger.debug(f"Could not load news API usage file: {e}")
+        return {'date': '', 'count': 0}
+
+    def _save_usage(self, data: Dict[str, Any]) -> None:
+        """Save usage data to file."""
+        try:
+            os.makedirs(os.path.dirname(self._usage_file), exist_ok=True)
+            with open(self._usage_file, 'w') as f:
+                json.dump(data, f)
+        except Exception as e:
+            logger.warning(f"Could not save news API usage file: {e}")
+
+    def _check_and_increment_usage(self) -> bool:
+        """Check if budget available and increment counter. Returns True if allowed."""
+        today = datetime.now().strftime('%Y-%m-%d')
+        data = self._load_usage()
+        
+        # Reset counter if new day
+        if data.get('date') != today:
+            data = {'date': today, 'count': 0}
+        
+        # Check budget
+        if data['count'] >= self._daily_budget:
+            logger.warning(f"NewsAPI daily budget exhausted ({data['count']}/{self._daily_budget})")
+            return False
+        
+        # Increment and save
+        data['count'] += 1
+        self._save_usage(data)
+        logger.debug(f"NewsAPI usage: {data['count']}/{self._daily_budget}")
+        return True
 
         # Default keywords for Kalshi markets - expanded to cover gaming, sports, and politics
         # These are used when market-specific keywords aren't provided
@@ -36,7 +89,13 @@ class NewsSentimentAnalyzer:
 
     def fetch_news(self, query: str = None, days_back: int = 1) -> List[Dict[str, Any]]:
         """
-        Fetch news articles from NewsAPI.
+        Fetch news articles from NewsAPI, with in-memory caching and 429 backoff.
+
+        Caching: results are cached for _cache_ttl_seconds (default 10 min) to avoid
+        burning through NewsAPI's 100 req/day free-tier limit.
+
+        Backoff: on 429 (rate limited), we skip fetching entirely for
+        _cache_ttl_seconds and reset the counter on success.
 
         Args:
             query: Search query (if None, uses default keywords)
@@ -49,11 +108,39 @@ class NewsSentimentAnalyzer:
             logger.warning("NewsAPI key not configured, skipping news fetch")
             return []
 
-        try:
-            # Build query from keywords if none provided
-            if not query:
-                query = ' OR '.join(f'"{kw}"' for kw in self.keywords[:5])  # Limit to avoid too broad search
+        # Build cache key from query + days_back
+        if not query:
+            query = ' OR '.join(f'"{kw}"' for kw in self.keywords[:5])
+        cache_key = f"{query}:{days_back}"
 
+        # Return cached result if fresh
+        if cache_key in self._news_cache:
+            articles, fetch_time = self._news_cache[cache_key]
+            age = (datetime.now() - fetch_time).total_seconds()
+            if age < self._cache_ttl_seconds:
+                logger.info(f"News cache hit ({age:.0f}s old), returning {len(articles)} cached articles")
+                return articles
+
+        # Skip fetch if we're in backoff from 429
+        if self._consecutive_429s > 0:
+            logger.warning(f"NewsAPI 429 backoff active (count={self._consecutive_429s}), skipping fetch")
+            # Return stale cache if available
+            if cache_key in self._news_cache:
+                articles, _ = self._news_cache[cache_key]
+                logger.info(f"Returning {len(articles)} stale cached articles during backoff")
+                return articles
+            return []
+
+        # H4: Check daily budget before making request
+        if not self._check_and_increment_usage():
+            # Return stale cache if available, else empty
+            if cache_key in self._news_cache:
+                articles, _ = self._news_cache[cache_key]
+                logger.info(f"Budget exhausted — returning {len(articles)} cached articles")
+                return articles
+            return []
+
+        try:
             # Calculate date range
             from_date = (datetime.now() - timedelta(days=days_back)).strftime('%Y-%m-%d')
 
@@ -70,9 +157,22 @@ class NewsSentimentAnalyzer:
 
             data = response.json()
             articles = data.get('articles', [])
-
+            self._news_cache[cache_key] = (articles, datetime.now())
+            self._consecutive_429s = 0  # reset on success
             logger.info(f"Fetched {len(articles)} news articles")
             return articles
+
+        except requests.exceptions.HTTPError as e:
+            if e.response is not None and e.response.status_code == 429:
+                self._consecutive_429s += 1
+                backoff_min = self._cache_ttl_seconds // 60
+                logger.warning(
+                    f"NewsAPI 429 rate limit hit (consecutive #{self._consecutive_429s}), "
+                    f"backing off for {backoff_min} min"
+                )
+            else:
+                logger.error(f"Error fetching news: {e}")
+            return []
 
         except Exception as e:
             logger.error(f"Error fetching news: {e}")
@@ -290,17 +390,22 @@ class NewsSentimentAnalyzer:
         Returns:
             News sentiment analysis for market relevance
         """
+        # Skip entirely if no API key configured — avoids unnecessary NewsAPI calls
+        if not self.api_key or self.api_key == "your_news_api_key":
+            logger.info("NewsAPI not configured, returning empty sentiment")
+            return {'headlines': [], 'sentiment_score': 0.0, 'confidence': 0.0}
+
         # Determine keywords to use: provided > extracted from markets > defaults
         # NOTE: dynamic extraction from market titles is disabled — titles contain
         # embedded yes/no markers that produce invalid search queries.
         # Using curated default keywords instead, which cover esports/sports/politics well.
         if not market_keywords:
             market_keywords = self.keywords
-        
+
         # Build search query from keywords (limit to 5 to avoid overly broad search)
         query_terms = market_keywords[:5]
         query = ' OR '.join(f'"{kw}"' for kw in query_terms)
-        
+
         logger.info(f"Fetching news with query: {query[:80]}...")
         articles = self.fetch_news(query=query, days_back=2)
 

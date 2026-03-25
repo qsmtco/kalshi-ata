@@ -1,4 +1,10 @@
 import os
+from pathlib import Path
+from dotenv import load_dotenv
+
+# Load .env file from project root (parent of src/)
+_env_path = Path(__file__).parent.parent / ".env"
+load_dotenv(_env_path)
 
 def _get_env(name, default):
     return os.environ.get(name, default)
@@ -32,6 +38,7 @@ ENABLE_NOTIFICATIONS = True
 NOTIFICATION_THRESHOLD = 0.05  # Notify if profit/loss exceeds this percentage
 
 # Advanced Strategy Parameters
+NEWS_SENTIMENT_ENABLED = False  # Disable news sentiment (NewsAPI has 100 req/day free tier limit)
 NEWS_SENTIMENT_THRESHOLD = 0.6  # Threshold for positive sentiment to trigger a trade
 STAT_ARBITRAGE_THRESHOLD = 0.05 # Price deviation for statistical arbitrage
 VOLATILITY_THRESHOLD = 0.1     # Volatility threshold for trading

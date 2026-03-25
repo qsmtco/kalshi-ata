@@ -3,7 +3,7 @@ import numpy as np
 import logging
 import time
 from typing import List, Dict, Any, Optional
-from config import BANKROLL, NEWS_SENTIMENT_THRESHOLD, STAT_ARBITRAGE_THRESHOLD, VOLATILITY_THRESHOLD, MAX_POSITION_SIZE_PERCENTAGE, STOP_LOSS_PERCENTAGE, PAPER_TRADING, MARKET_MAKING_ENABLED, KYLE_REFRESH_INTERVAL_SEC, HAWKES_REFRESH_INTERVAL_SEC, VPIN_REFRESH_INTERVAL_SEC
+from config import BANKROLL, NEWS_SENTIMENT_ENABLED, NEWS_SENTIMENT_THRESHOLD, STAT_ARBITRAGE_THRESHOLD, VOLATILITY_THRESHOLD, MAX_POSITION_SIZE_PERCENTAGE, STOP_LOSS_PERCENTAGE, PAPER_TRADING, MARKET_MAKING_ENABLED, KYLE_REFRESH_INTERVAL_SEC, HAWKES_REFRESH_INTERVAL_SEC, VPIN_REFRESH_INTERVAL_SEC
 from news_analyzer import NewsSentimentAnalyzer
 from arbitrage_analyzer import StatisticalArbitrageAnalyzer
 from volatility_analyzer import VolatilityAnalyzer
@@ -18,6 +18,7 @@ from market_maker import MarketMaker
 from kyle_lambda import KalshiKyleLambda
 from hawkes_process import KalshiHawkesEstimator
 from vpin import KalshiVPINEstimator
+from bot_state import fetch_balance
 from avellaneda_stoikov import KalshiMarketMaker
 from orderbook_analyzer import OrderBookAnalyzer
 from almgren_chriss import AlmgrenChrissExecutor
@@ -53,6 +54,13 @@ class Trader:
 
         # Phase 5: Circuit breaker for safety
         self.circuit_breaker = CircuitBreaker()
+        # Send Telegram alert if circuit breaker loaded in HALTED state
+        if self.circuit_breaker.needs_alert:
+            self.logger.warning(f"Circuit breaker HALTED on startup: {self.circuit_breaker.pause_reason}")
+            self.notifier.send_error_notification(
+                f"🚨 CIRCUIT BREAKER HALTED: {self.circuit_breaker.pause_reason}\n"
+                f"Manual intervention required to resume trading."
+            )
         
         # Phase 1: Daily loss limit (15%)
         self.DAILY_LOSS_LIMIT = 0.15  # 15% of bankroll
@@ -120,6 +128,39 @@ class Trader:
         # Order Tracker — tracks open orders, fills, requoting
         self.order_tracker = OrderTracker(stale_threshold_seconds=60.0)
         self._last_tracker_log = 0.0  # throttle tracker metric logging
+
+        # GTC order tracking for exit orders that didn't fill immediately
+        # Format: {ticker: {'order_id': str, 'count': int, 'price': float, 'is_partial': bool, 'exit_qty': int|None}}
+        self._gtc_orders: Dict[str, dict] = {}
+
+    def sync_bankroll_from_api(self) -> Optional[float]:
+        """
+        Fetch actual account balance from Kalshi API and update risk_manager.
+
+        IMPORTANT: Kalshi returns all monetary values in CENTS. This function
+        converts to dollars before updating current_bankroll.
+
+        Returns:
+            The updated bankroll (in dollars), or None if fetch failed.
+        """
+        try:
+            balance_data = fetch_balance(self.api)
+            summary = balance_data.get("summary", {})
+            # Use total_equity if available, otherwise available balance
+            actual_balance = summary.get("total_equity") or summary.get("available")
+            if actual_balance is None:
+                self.logger.warning("Could not determine actual balance from API response")
+                return None
+
+            self.risk_manager.current_bankroll = actual_balance
+            self.logger.info(
+                f"Bankroll synced from API: ${actual_balance:.2f} "
+                f"(was configured as ${self.bankroll:.2f})"
+            )
+            return actual_balance
+        except Exception as e:
+            self.logger.warning(f"Failed to sync bankroll from API: {e}")
+            return None
 
     def _on_settings_changed(self, changed_settings: Dict[str, Any]):
         """Handle dynamic settings changes."""
@@ -842,9 +883,16 @@ class Trader:
         try:
             # Get current market data from streamer
             market_data = self.market_data_streamer.get_all_markets_data()
-            
-            # Format for strategy (wrap in dict with 'markets' key)
             markets_list = list(market_data.values()) if market_data else []
+
+            # Always fetch synchronously if no markets yet — don't run a blind cycle
+            if not markets_list:
+                self.logger.info(f"Market data empty — triggering synchronous fetch...")
+                self.market_data_streamer._update_market_data()
+                market_data = self.market_data_streamer.get_all_markets_data()
+                markets_list = list(market_data.values()) if market_data else []
+
+            # Format for strategy (wrap in dict with 'markets' key)
             formatted_data = {'markets': markets_list}
             
             # Phase 1: Update current prices for all open positions each cycle
@@ -857,6 +905,11 @@ class Trader:
             exit_events = self.check_and_execute_exits()
             if exit_events:
                 self.logger.info(f"Exit events this cycle: {len(exit_events)}")
+
+            # Check GTC order fills — close locally on confirmed fill
+            gtc_fills = self.check_gtc_order_fills()
+            if gtc_fills:
+                self.logger.info(f"GTC fills this cycle: {len(gtc_fills)}")
 
             # Analyze and make trade decision
             trade_decision = self.analyze_market(formatted_data)
@@ -913,6 +966,23 @@ class Trader:
             self.logger.warning("Skipping trade - daily loss limit exceeded")
             return None
 
+        # Cycle stats — tracks what happened at each filter gate for visibility
+        cycle = {
+            'total_markets': 0,
+            'no_price': 0,
+            'vpin_skip': 0,
+            'hawkes_skip': 0,
+            'no_bid': 0,
+            'in_sweet': 0,
+            'quality_passed': 0,
+            'quality_failed': 0,
+            'news_triggered': False,
+            'news_skipped_market': 0,
+            'arb_found_pairs': 0,
+            'arb_triggered': False,
+            'vol_triggered': False,
+        }
+
         # ------------------------------------------------------------------
         # MICROSTRUCTURE SIGNAL GATE — VPIN + Hawkes + Kyle (Option A)
         # Skip if extreme adverse selection or extreme clustering.
@@ -938,6 +1008,7 @@ class Trader:
                     f"⛔ SKIP {market_id}: VPIN={vpin_result['vpin']:.3f} "
                     f"({vpin_result['signal']}) — extreme adverse selection"
                 )
+                cycle['vpin_skip'] += 1
                 return None
             if vpin_result.get('signal') in ('high', 'elevated'):
                 self.logger.info(
@@ -951,6 +1022,7 @@ class Trader:
                     f"⛔ SKIP {market_id}: Hawkes BR={hawkes_result['branching_ratio']:.3f} "
                     f"({hawkes_result['signal']}) — extreme clustering"
                 )
+                cycle['hawkes_skip'] += 1
                 return None
             if hawkes_result.get('signal') == 'moderate':
                 self.logger.info(
@@ -990,6 +1062,7 @@ class Trader:
 
                 if sentiment_decision['should_trade']:
                     self.logger.info(f"News sentiment signal: {sentiment_decision['reason']}")
+                    cycle['news_triggered'] = True
 
                     # Find suitable market to trade based on sentiment
                     markets_in_data = market_data.get('markets', []) if isinstance(market_data, dict) else []
@@ -1010,7 +1083,8 @@ class Trader:
                                 vol = self.risk_manager.compute_annualized_volatility(market.price_history)
                             position_size_fraction = self.risk_manager.calculate_position_size_kelly(
                                 confidence=sentiment_decision['confidence'],
-                                volatility=vol
+                                volatility=vol,
+                                price=current_price
                             )
                             position_value = self.risk_manager.current_bankroll * position_size_fraction
                             quantity = max(1, int(position_value / current_price))
@@ -1040,6 +1114,188 @@ class Trader:
                             self.logger.info(f"News sentiment trade decision: {action} {event_id} "
                                            f"at {current_price} (sentiment: {sentiment_decision['sentiment_score']:.3f})")
                         else:
+                            self.logger.warning(f"News sentiment: no suitable market found — event_id={event_id}, current_price={current_price}, markets_count={len(market_data.get('markets', []))}")
+
+            except Exception as e:
+                self.logger.error(f"Error in news sentiment analysis: {e}")
+
+        # Strategy 2: Statistical Arbitrage (if enabled and no sentiment signal)
+        if not trade_decision and settings.statistical_arbitrage_enabled:
+            try:
+                arbitrage_opportunities = self._statistical_arbitrage(market_data)
+                if arbitrage_opportunities:
+                    # Take the highest confidence opportunity
+                    best_opportunity = arbitrage_opportunities[0]
+                    execution_decision = self.arbitrage_analyzer.should_execute_arbitrage(
+                        best_opportunity, risk_tolerance=settings.stat_arbitrage_threshold
+                    )
+
+                    if execution_decision['should_execute']:
+                        self.logger.info(f"Arbitrage signal: {execution_decision['reason']}")
+                        cycle['arb_triggered'] = True
+
+                        # For simplicity, focus on one side of the arbitrage pair
+                        market1 = execution_decision['market1']
+                        market2 = execution_decision['market2']
+
+                        if best_opportunity['signal'] == 'LONG_SPREAD':
+                            event_id = market1['market_id']
+                            action = 'buy'
+                        else:  # SHORT_SPREAD
+                            event_id = market1['market_id']
+                            action = 'sell'
+
+                        # Apply volatility-adjusted Kelly sizing
+                        # Compute vol from market's price history (market1 is already a dict)
+                        vol = self.risk_manager.compute_annualized_volatility(market1.get('price_history', []))
+                        position_size_fraction = self.risk_manager.calculate_position_size_kelly(
+                            confidence=execution_decision['confidence'],
+                            volatility=vol,
+                            price=market1['current_price']
+                        )
+                        position_value = self.risk_manager.current_bankroll * position_size_fraction
+                        quantity = max(1, int(position_value / market1['current_price']))
+
+                        trade_decision = {
+                            'event_id': event_id,
+                            'action': action,
+                            'quantity': quantity,
+                            'price': market1['current_price'],
+                            'strategy': 'statistical_arbitrage',
+                            'z_score': best_opportunity['z_score'],
+                            'confidence': execution_decision['confidence'],
+                            'arbitrage_pair': [market1['market_id'], market2['market_id']]
+                        }
+
+                        # Phase 3: Market selection gate
+                        tradeable, reason = is_tradeable(
+                            market1,
+                            market_data_streamer=self.market_data_streamer,
+                            signal_confidence=execution_decision.get('confidence', 0.0) * 0.2,
+                            min_quality=30.0,
+                        )
+                        if not tradeable:
+                            self.logger.info(f"Arbitrage: SKIP {event_id[:30]} — market selection: {reason}")
+                            trade_decision = None
+                        else:
+                            self.logger.info(f"Arbitrage trade decision: {action} {event_id} "
+                                           f"(z-score: {best_opportunity['z_score']:.3f})")
+
+            except Exception as e:
+                self.logger.error(f"Error in statistical arbitrage: {e}")
+
+        # Strategy 3: Volatility Analysis (if enabled and no other signals)
+        if not trade_decision and settings.volatility_based_enabled:
+            try:
+                volatility_decision = self._volatility_analysis(market_data)
+                if volatility_decision and volatility_decision.get('should_trade'):
+                    self.logger.info(f"Volatility signal: {volatility_decision['reason']}")
+
+                    # Find market for volatility-based trade
+                    if market_data and 'markets' in market_data and market_data['markets']:
+                        market = market_data['markets'][0]  # Could be enhanced to select based on volatility
+                        event_id = market.get('id')
+                        current_price = market.get('current_price')
+
+                        if event_id and current_price and volatility_decision.get('direction'):
+                            action = 'buy' if volatility_decision['direction'] == 'long' else 'sell'
+
+                            # Apply volatility-adjusted Kelly sizing
+                            # Pass current annualized volatility from GARCH analysis
+                            vol = volatility_decision.get('volatility_analysis', {}).get('current_volatility', None)
+                            position_size_fraction = self.risk_manager.calculate_position_size_kelly(
+                                confidence=volatility_decision['confidence'],
+                                volatility=vol,
+                                price=current_price
+                            )
+                            position_value = self.risk_manager.current_bankroll * position_size_fraction
+                            quantity = max(1, int(position_value / current_price))
+
+                            trade_decision = {
+                                'event_id': event_id,
+                                'action': action,
+                                'quantity': quantity,
+                                'price': current_price,
+                                'strategy': 'volatility_based',
+                                'volatility_regime': volatility_decision.get('volatility_regime'),
+                                'confidence': volatility_decision['confidence'],
+                                'signal_type': volatility_decision.get('signal_type')
+                            }
+
+                            # Phase 3: Market selection gate
+                            tradeable, reason = is_tradeable(
+                                market,
+                                market_data_streamer=self.market_data_streamer,
+                                signal_confidence=volatility_decision.get('confidence', 0.0) * 0.2,
+                                min_quality=30.0,
+                            )
+                            if not tradeable:
+                                self.logger.info(f"Volatility: SKIP {event_id[:30]} — market selection: {reason}")
+                                trade_decision = None
+                            else:
+                                self.logger.info(f"Volatility trade decision: {action} {event_id} "
+                                               f"(regime: {volatility_decision.get('volatility_regime')})")
+                                cycle['vol_triggered'] = True
+
+            except Exception as e:
+                self.logger.error(f"Error in volatility analysis: {e}")
+
+        # ------------------------------------------------------------------
+        # KYLE λ POSITION SCALING — apply after all strategies
+        # Scale down quantity based on price impact signal.
+        # ------------------------------------------------------------------
+        if trade_decision and kyle_result.get('position_scale', 1.0) < 1.0:
+            original_qty = trade_decision['quantity']
+            scale = kyle_result['position_scale']
+            trade_decision['quantity'] = max(1, int(original_qty * scale))
+            trade_decision['kyle_scale'] = scale
+            trade_decision['kyle_signal'] = kyle_result.get('signal', 'unknown')
+            self.logger.info(
+                f"📉 Kyle λ position scaling: {original_qty} → {trade_decision['quantity']} "
+                f"(×{scale:.2f}, signal={kyle_result.get('signal')})"
+            )
+
+        # Attach microstructure signal metadata to trade_decision for execute_trade logging
+        if trade_decision:
+            trade_decision['_microstructure'] = {
+                'vpin':     vpin_result.get('vpin', 0.0),
+                'vpin_signal':  vpin_result.get('signal', 'unknown'),
+                'hawkes_br':    hawkes_result.get('branching_ratio', 0.0),
+                'hawkes_signal': hawkes_result.get('signal', 'unknown'),
+                'kyle_lambda':  kyle_result.get('lambda', 0.0),
+                'kyle_r2':      kyle_result.get('r_squared', 0.0),
+                'kyle_signal':  kyle_result.get('signal', 'unknown'),
+                'kyle_scale':   kyle_result.get('position_scale', 1.0),
+            }
+
+        # --- CYCLE SUMMARY ---
+        # Log what happened this cycle for visibility
+        triggered = []
+        if cycle['news_triggered']:
+            triggered.append('news')
+        if cycle['arb_triggered']:
+            triggered.append('arb')
+        if cycle['vol_triggered']:
+            triggered.append('vol')
+
+        trade_emoji = "🚀" if trade_decision else "😴"
+        signals = f"signals: {', '.join(triggered)}" if triggered else "no signals"
+        self.logger.info(
+            f"{trade_emoji} CYCLE: {cycle['total_markets']} markets | "
+            f"vpin_skip={cycle['vpin_skip']} hawkes_skip={cycle['hawkes_skip']} "
+            f"no_price={cycle['no_price']} sweet_spot={cycle['in_sweet']} "
+            f"quality_pass={cycle['quality_passed']} | {signals}"
+        )
+
+        return trade_decision
+
+    def execute_trade(self, trade_decision):
+        """
+        Execute trade with basic risk management and circuit breaker.
+        """
+        # Phase 5: Check circuit breaker before any trade
+        if not self.circuit_breaker.can_trade():
+            status = self.circuit_breaker.get_status()
             self.logger.warning(f"CIRCUIT BREAKER BLOCKED TRADE: {status['state']} - {status['reason']}")
             self.notifier.send_error_notification(f"Trade blocked by circuit breaker: {status['state']}")
             return
@@ -1327,19 +1583,24 @@ class Trader:
         try:
             api_response = self.api.create_order(gtc_payload)
             order = api_response.get('order', {})
+            order_id = order.get('id')
             status = order.get('status', 'unknown')
             self.logger.info(
                 f"SELL LIMIT PLACED: {qty_to_sell} {ticker[:30]} @ ${price:.4f} "
                 f"reason={exit_reason} status={status} method=limit — resting on book"
             )
-            # Step 3.3: Same partial/full exit bookkeeping for GTC fallback
-            if exit_qty is not None and exit_qty < count:
-                self.position_tracker.reduce_position(ticker, exit_qty, reason=exit_reason)
-                self.logger.info(f"PARTIAL EXIT SUCCESS (limit): {ticker[:20]} "
-                                 f"{exit_qty} contracts @ ${price:.4f}")
-            else:
-                self.close_position_simple(ticker, price, f"exit: {exit_reason}")
-            return {'success': True, 'order': order, 'method': 'limit', 'trade_id': trade_id}
+            # Track GTC order — do NOT close locally until confirmed filled
+            self._gtc_orders[ticker] = {
+                'order_id': order_id,
+                'trade_id': f"limit_{trade_id}",
+                'count': qty_to_sell,
+                'price': price,
+                'is_partial': is_partial,
+                'exit_qty': exit_qty if is_partial else None,
+                'exit_reason': exit_reason,
+            }
+            self.logger.info(f"GTC ORDER TRACKED: {ticker[:20]} order_id={order_id} — pending fill")
+            return {'success': True, 'order': order, 'method': 'limit', 'trade_id': trade_id, 'pending_fill': True}
         except Exception as e:
             self.logger.error(f"Sell limit also failed for {ticker}: {e}")
             return {'success': False, 'error': str(e), 'trade_id': trade_id}
@@ -1347,6 +1608,33 @@ class Trader:
     # =========================================================================
     # PHASE 2.3: Exit evaluation + sell execution
     # =========================================================================
+
+    def check_gtc_order_fills(self) -> list[dict]:
+        """
+        Check all tracked GTC orders for fill status.
+        Close position locally only on confirmed fill.
+        Returns list of filled orders.
+        """
+        filled = []
+        for ticker, info in list(self._gtc_orders.items()):
+            try:
+                order_status = self.api.get_order(info['order_id'])
+                status = order_status.get('order', {}).get('status', 'unknown')
+                if status in ('filled', 'completely_filled'):
+                    self.logger.info(f"GTC ORDER FILLED: {ticker[:20]} order_id={info['order_id']}")
+                    # Now close locally
+                    if info['is_partial'] and info['exit_qty']:
+                        self.position_tracker.reduce_position(ticker, info['exit_qty'], reason=info['exit_reason'])
+                    else:
+                        self.close_position_simple(ticker, info['price'], f"exit: {info['exit_reason']}")
+                    filled.append({'ticker': ticker, 'order_id': info['order_id'], 'status': status})
+                    del self._gtc_orders[ticker]
+                elif status == 'cancelled':
+                    self.logger.warning(f"GTC ORDER CANCELLED: {ticker[:20]} order_id={info['order_id']}")
+                    del self._gtc_orders[ticker]
+            except Exception as e:
+                self.logger.warning(f"Failed to check GTC order {info['order_id']}: {e}")
+        return filled
 
     def check_and_execute_exits(self) -> list[dict]:
         """
@@ -1357,6 +1645,11 @@ class Trader:
         exits = []
 
         for pos in self.position_tracker.get_all_positions():
+            # Skip if there's a pending GTC order for this ticker
+            if pos.ticker in self._gtc_orders:
+                self.logger.debug(f"Exit check: skipping {pos.ticker} — pending GTC order")
+                continue
+
             # Get current price from market data streamer
             market_md = self.market_data_streamer.get_market_data(pos.ticker)
             if not market_md:

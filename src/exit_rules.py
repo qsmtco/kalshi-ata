@@ -214,30 +214,31 @@ def evaluate_all(position, current_price: float, hours_remaining: float = 999.0,
                 market_md=None) -> ExitResult:
     """
     Run all exit rules. Returns first triggered exit in priority order:
-    1. liquidity_exit — highest priority — if bids gone, must exit regardless of price
-    2. stop_loss
+    1. stop_loss — HIGHEST priority, returns FULL exit immediately
+    2. liquidity_exit — if bids gone, must exit regardless of price
     3. market_close
     4. take_profit
     5. atr_trailing_stop (Phase 4 — no-op if not yet wired)
-    6. probability_shift
-    7. time_exit
+    6. partial_exit tiers (only if stop_loss not triggered)
+    7. probability_shift
+    8. time_exit
     """
     checks = [
-        # 1. Liquidity exit (Step 2.3 — highest priority)
-        lambda p, c, md: check_liquidity_exit(p, md) if md else ExitResult(False, 'none', ''),
-        # 2. Stop loss
+        # 1. Stop loss — HIGHEST priority (H7: moved to first)
         lambda p, c, md: check_stop_loss(p, c),
+        # 2. Liquidity exit (Step 2.3)
+        lambda p, c, md: check_liquidity_exit(p, md) if md else ExitResult(False, 'none', ''),
         # 3. Market close (time barrier)
         lambda p, c, md: _check_market_close(p, hours_remaining),
         # 4. Take profit (barrier-based — Phase 5)
         lambda p, c, md: check_barrier_take_profit(p, c),
-        # 4b. Partial exit tiers (Phase 3 — evaluated after main TP)
-        lambda p, c, md: check_partial_exit(p, c),
         # 5. ATR trailing stop (Phase 4)
         lambda p, c, md: check_atr_trailing_stop(p, c),
-        # 6. Probability shift
+        # 6. Partial exit tiers (Phase 3 — only if stop_loss not triggered)
+        lambda p, c, md: check_partial_exit(p, c),
+        # 7. Probability shift
         lambda p, c, md: check_probability_shift(p, c),
-        # 7. Time exit
+        # 8. Time exit
         lambda p, c, md: check_time_exit(p),
     ]
     for check in checks:

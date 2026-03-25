@@ -425,13 +425,16 @@ class BotInterface {
         }
 
         console.log('Stopping Python bot...');
-        this.pythonProcess.kill('SIGTERM');
-        
+        // Store reference to the process we're killing so the timeout only affects THIS process.
+        const processToKill = this.pythonProcess;
+        processToKill.kill('SIGTERM');
+
         // Force kill after 5 seconds if it doesn't stop gracefully
         setTimeout(() => {
-            if (this.pythonProcess) {
+            // Only force-kill if this is still the same process (not a new one that started after)
+            if (this.pythonProcess === processToKill) {
                 console.log('Force killing Python bot...');
-                this.pythonProcess.kill('SIGKILL');
+                processToKill.kill('SIGKILL');
             }
         }, 5000);
     }

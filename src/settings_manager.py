@@ -12,7 +12,7 @@ DEFAULTS = {
     'volatility_threshold': 0.1,
     'trade_interval_seconds': 60,
     # Strategy enables
-    'news_sentiment_enabled': True,
+    'news_sentiment_enabled': False,  # Disabled: NewsAPI free tier (100 req/day) gets exhausted quickly
     'statistical_arbitrage_enabled': False,
     'volatility_based_enabled': False,
     # Notifications
@@ -96,14 +96,25 @@ class SettingsManager:
             )
         self.db.commit()
 
+    def _parse_value(self, key: str, raw: str) -> Any:
+        """Parse a stored string value back to its Python type."""
+        default = DEFAULTS.get(key)
+        if default is None:
+            return raw
+        # Explicitly handle booleans — bool('False') is True (non-empty string!)
+        if isinstance(default, bool):
+            return raw == 'True'
+        if isinstance(default, float):
+            return float(raw)
+        if isinstance(default, int):
+            return int(raw)
+        return raw
+
     def get(self, key: str) -> Any:
         cur = self.db.execute('SELECT value FROM current_settings WHERE parameter = ?', (key,))
         row = cur.fetchone()
         if row:
-            # Convert to appropriate type based on defaults
-            if key in DEFAULTS:
-                return type(DEFAULTS[key])(row[0])
-            return row[0]
+            return self._parse_value(key, row[0])
         return DEFAULTS.get(key)
 
     def update(self, key: str, value: Any, source: str, reason: str = ''):
@@ -149,7 +160,7 @@ class SettingsManager:
         result = {}
         for param, val in rows:
             if param in DEFAULTS:
-                result[param] = type(DEFAULTS[param])(val)
+                result[param] = self._parse_value(param, val)
             else:
                 result[param] = val
         return result

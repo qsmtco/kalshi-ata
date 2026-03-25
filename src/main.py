@@ -16,6 +16,10 @@ def main():
     logger = setup_logging()
     logger.info("Starting Kalshi Advanced Trading Bot with Phase 3 features")
 
+    # Initialize to None to prevent UnboundLocalError in exception handlers
+    trader = None
+    notifier = None
+
     # Log trading mode clearly
     demo_mode = os.environ.get('KALSHI_DEMO_MODE', 'true').lower() == 'true'
     paper_mode = PAPER_TRADING
@@ -31,9 +35,18 @@ def main():
         notifier = Notifier(TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID)
         trader = Trader(api, notifier, logger, BANKROLL)
 
+        # Sync actual account balance from API (balance is returned in cents, converted to dollars)
+        trader.sync_bankroll_from_api()
+
         # Start market data streaming (Phase 3 feature)
         trader.market_data_streamer.start_streaming()
         logger.info("Market data streaming started")
+
+        # Initial blocking fetch — populate markets before first trading cycle
+        # Without this, the daemon's first fetch takes ~65s, leaving markets_data empty
+        logger.info("Initial market fetch (blocking, ~5s)...")
+        trader.market_data_streamer._update_market_data()
+        logger.info(f"Initial fetch done — {len(trader.market_data_streamer.markets_data)} markets loaded")
 
         # Phase 1: Sync open positions from API into PositionTracker
         try:
@@ -55,14 +68,18 @@ def main():
 
     except KeyboardInterrupt:
         logger.info("Bot shutdown requested by user")
-        trader.market_data_streamer.stop_streaming()
+        if trader:
+            trader.market_data_streamer.stop_streaming()
     except Exception as e:
         logger.error(f"An error occurred: {e}")
-        notifier.send_error_notification(str(e))
-        trader.market_data_streamer.stop_streaming()
+        if notifier:
+            notifier.send_error_notification(str(e))
+        if trader:
+            trader.market_data_streamer.stop_streaming()
         raise
     finally:
-        trader.market_data_streamer.stop_streaming()
+        if trader:
+            trader.market_data_streamer.stop_streaming()
         logger.info("Market data streaming stopped")
 
 if __name__ == "__main__":

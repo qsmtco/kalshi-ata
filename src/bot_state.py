@@ -37,14 +37,31 @@ def _cents_to_dollars(value: Any) -> float | None:
 
 
 def fetch_balance(api: KalshiAPI) -> Dict[str, Any]:
+    """
+    Fetch account balance from Kalshi API.
+
+    IMPORTANT: Kalshi returns all monetary values in CENTS (integer), not dollars.
+    All values are converted to dollars via _cents_to_dollars().
+
+    The API returns fields like:
+      - balance: total cash balance (cents)
+      - portfolio_value: total portfolio value (cents)
+      - available_cash: cash available for trading (cents)
+    """
     raw = api.get_account_balance() or {}
 
+    # Determine the best available balance field (Kalshi uses different field names)
+    # Try in order of preference: available_cash > balance > available_balance
+    balance_raw = (
+        raw.get("available_cash")
+        or raw.get("balance")
+        or raw.get("available_balance")
+        or raw.get("cash_balance")
+    )
+
     summary = {
-        "available": _cents_to_dollars(
-            raw.get("available_cash")
-            or raw.get("available_balance")
-            or raw.get("cash_balance")
-        ),
+        # Convert from cents to dollars for all monetary values
+        "available": _cents_to_dollars(balance_raw),
         "total_equity": _cents_to_dollars(
             raw.get("portfolio_value") or raw.get("equity") or raw.get("total_equity")
         ),
